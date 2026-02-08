@@ -34,7 +34,13 @@ async def upload_files(
     srt: UploadFile = File(...),
     similarity_threshold: float = Form(settings.DEFAULT_SIMILARITY_THRESHOLD),
     min_display_duration: float = Form(settings.DEFAULT_MIN_DISPLAY_DURATION),
-    output_resolution: str = Form(settings.DEFAULT_OUTPUT_RESOLUTION)
+    output_resolution: str = Form(settings.DEFAULT_OUTPUT_RESOLUTION),
+    srt_merge_gap_sec: float = Form(settings.SRT_MERGE_GAP_SEC),
+    srt_min_duration_sec: float = Form(settings.SRT_MIN_DURATION_SEC),
+    align_max_backtrack: int = Form(settings.ALIGN_MAX_BACKTRACK),
+    align_max_forward_jump: int = Form(settings.ALIGN_MAX_FORWARD_JUMP),
+    align_switch_penalty: float = Form(settings.ALIGN_SWITCH_PENALTY),
+    align_forward_jump_penalty: float = Form(settings.ALIGN_FORWARD_JUMP_PENALTY)
 ):
     """上传文件并启动视频生成任务"""
     
@@ -102,7 +108,13 @@ async def upload_files(
             str(srt_path),
             similarity_threshold,
             min_display_duration,
-            output_resolution
+            output_resolution,
+            srt_merge_gap_sec,
+            srt_min_duration_sec,
+            align_max_backtrack,
+            align_max_forward_jump,
+            align_switch_penalty,
+            align_forward_jump_penalty
         )
         
         return {
@@ -202,7 +214,13 @@ async def process_video_generation(
     srt_path: str,
     similarity_threshold: float,
     min_display_duration: float,
-    output_resolution: str
+    output_resolution: str,
+    srt_merge_gap_sec: float,
+    srt_min_duration_sec: float,
+    align_max_backtrack: int,
+    align_max_forward_jump: int,
+    align_switch_penalty: float,
+    align_forward_jump_penalty: float
 ):
     """视频生成处理流程"""
     
@@ -211,10 +229,27 @@ async def process_video_generation(
     similarity_threshold = min(max(similarity_threshold, 0.1), 0.9)
     # 确保最小展示时长至少1秒
     min_display_duration = max(min_display_duration, 1.0)
+    # SRT预处理参数约束
+    srt_merge_gap_sec = min(max(srt_merge_gap_sec, 0.0), 3.0)
+    srt_min_duration_sec = min(max(srt_min_duration_sec, 0.1), 5.0)
+    # 对齐参数约束
+    align_max_backtrack = int(min(max(align_max_backtrack, 0), 5))
+    align_max_forward_jump = int(min(max(align_max_forward_jump, 0), 10))
+    align_switch_penalty = min(max(align_switch_penalty, 0.0), 1.0)
+    align_forward_jump_penalty = min(max(align_forward_jump_penalty, 0.0), 1.0)
     
-    logger.info(f"视频生成参数: similarity_threshold={similarity_threshold}, "
-                f"min_display_duration={min_display_duration}, "
-                f"output_resolution={output_resolution}")
+    logger.info(
+        "视频生成参数: "
+        f"similarity_threshold={similarity_threshold}, "
+        f"min_display_duration={min_display_duration}, "
+        f"output_resolution={output_resolution}, "
+        f"srt_merge_gap_sec={srt_merge_gap_sec}, "
+        f"srt_min_duration_sec={srt_min_duration_sec}, "
+        f"align_max_backtrack={align_max_backtrack}, "
+        f"align_max_forward_jump={align_max_forward_jump}, "
+        f"align_switch_penalty={align_switch_penalty}, "
+        f"align_forward_jump_penalty={align_forward_jump_penalty}"
+    )
     
     # 阶段标记，用于错误诊断
     processing_stage = "initialization"
@@ -257,9 +292,9 @@ async def process_video_generation(
         # 2.1 预处理字幕（合并/清洗）
         segments = srt_service.preprocess_subtitles(
             subtitles=subtitles,
-            merge_gap_sec=settings.SRT_MERGE_GAP_SEC,
+            merge_gap_sec=srt_merge_gap_sec,
             min_chars=settings.SRT_MIN_CHARS,
-            min_duration_sec=settings.SRT_MIN_DURATION_SEC,
+            min_duration_sec=srt_min_duration_sec,
             max_chars=settings.SRT_MAX_CHARS,
             filler_patterns=settings.SRT_FILLER_PATTERNS
         )
@@ -275,7 +310,11 @@ async def process_video_generation(
             slides=slides,
             subtitles=segments,
             similarity_threshold=similarity_threshold,
-            min_display_duration=min_display_duration
+            min_display_duration=min_display_duration,
+            align_max_backtrack=align_max_backtrack,
+            align_max_forward_jump=align_max_forward_jump,
+            align_switch_penalty=align_switch_penalty,
+            align_forward_jump_penalty=align_forward_jump_penalty
         )
         
         if not timeline:

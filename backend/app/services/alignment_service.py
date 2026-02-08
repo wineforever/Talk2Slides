@@ -36,7 +36,12 @@ class AlignmentService:
         slides: List[Dict[str, Any]],
         subtitles: List[Dict[str, Any]],
         similarity_threshold: float = 0.5,
-        min_display_duration: float = 2.0
+        min_display_duration: float = 2.0,
+        align_max_backtrack: int = None,
+        align_max_forward_jump: int = None,
+        align_switch_penalty: float = None,
+        align_backtrack_penalty: float = None,
+        align_forward_jump_penalty: float = None
     ) -> List[Dict[str, Any]]:
         """将幻灯片与字幕进行语义对齐
         
@@ -45,6 +50,11 @@ class AlignmentService:
             subtitles: 预处理后的字幕片段列表，每个片段包含text字段
             similarity_threshold: 相似度阈值（用于诊断与统计）
             min_display_duration: 最小展示时长（秒）
+            align_max_backtrack: 最大回退页数（None使用默认配置）
+            align_max_forward_jump: 最大前跳页数（None使用默认配置）
+            align_switch_penalty: 切换惩罚（None使用默认配置）
+            align_backtrack_penalty: 回退惩罚（None使用默认配置）
+            align_forward_jump_penalty: 前跳惩罚（None使用默认配置）
             
         Returns:
             时间轴映射列表，每个元素包含start, end, slide_index
@@ -66,6 +76,20 @@ class AlignmentService:
         
         logger.info(f"开始语义对齐: {len(slides)}张幻灯片, {len(subtitles)}个字幕片段")
         logger.info(f"参数设置: similarity_threshold={similarity_threshold}, min_display_duration={min_display_duration}")
+        
+        max_backtrack = settings.ALIGN_MAX_BACKTRACK if align_max_backtrack is None else align_max_backtrack
+        max_forward_jump = settings.ALIGN_MAX_FORWARD_JUMP if align_max_forward_jump is None else align_max_forward_jump
+        switch_penalty = settings.ALIGN_SWITCH_PENALTY if align_switch_penalty is None else align_switch_penalty
+        backtrack_penalty = settings.ALIGN_BACKTRACK_PENALTY if align_backtrack_penalty is None else align_backtrack_penalty
+        forward_jump_penalty = settings.ALIGN_FORWARD_JUMP_PENALTY if align_forward_jump_penalty is None else align_forward_jump_penalty
+        logger.info(
+            "对齐约束: "
+            f"max_backtrack={max_backtrack}, "
+            f"max_forward_jump={max_forward_jump}, "
+            f"switch_penalty={switch_penalty}, "
+            f"backtrack_penalty={backtrack_penalty}, "
+            f"forward_jump_penalty={forward_jump_penalty}"
+        )
         
         # 1. 准备文本（优先使用备注作为对齐文本）
         slide_texts = self._build_slide_alignment_texts(slides)
@@ -142,11 +166,11 @@ class AlignmentService:
         # 4. 受限回退的单调序列对齐（Viterbi/DP）
         path = self._align_with_viterbi(
             similarity_matrix=similarity_matrix,
-            max_backtrack=settings.ALIGN_MAX_BACKTRACK,
-            max_forward_jump=settings.ALIGN_MAX_FORWARD_JUMP,
-            switch_penalty=settings.ALIGN_SWITCH_PENALTY,
-            backtrack_penalty=settings.ALIGN_BACKTRACK_PENALTY,
-            forward_jump_penalty=settings.ALIGN_FORWARD_JUMP_PENALTY
+            max_backtrack=max_backtrack,
+            max_forward_jump=max_forward_jump,
+            switch_penalty=switch_penalty,
+            backtrack_penalty=backtrack_penalty,
+            forward_jump_penalty=forward_jump_penalty
         )
 
         # 应用最小时长约束生成时间轴
