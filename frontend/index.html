@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>基于语义对齐的自动视频生成</title>
+    <!-- Element Plus CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
+    <!-- Vue 3 -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <!-- Element Plus JS -->
+    <script src="https://unpkg.com/element-plus"></script>
+    <!-- Axios -->
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            padding: 40px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        .header h1 {
+            color: #2c3e50;
+            font-size: 2.8rem;
+            margin-bottom: 10px;
+        }
+        .header p {
+            color: #7f8c8d;
+            font-size: 1.2rem;
+        }
+        .upload-section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 30px;
+        }
+        .upload-title {
+            font-size: 1.5rem;
+            color: #34495e;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .upload-title i {
+            color: #3498db;
+        }
+        .upload-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 25px;
+        }
+        .upload-card {
+            background: white;
+            border-radius: 10px;
+            padding: 25px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            transition: transform 0.3s ease;
+        }
+        .upload-card:hover {
+            transform: translateY(-5px);
+        }
+        .upload-card h3 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+            font-size: 1.3rem;
+        }
+        .file-list {
+            margin-top: 15px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background: #f1f8ff;
+            border-radius: 6px;
+            margin-bottom: 8px;
+        }
+        .file-name {
+            font-size: 0.9rem;
+            color: #2c3e50;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex: 1;
+        }
+        .file-size {
+            font-size: 0.8rem;
+            color: #7f8c8d;
+            margin-left: 10px;
+        }
+        .remove-btn {
+            color: #e74c3c;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        .params-section {
+            margin-bottom: 30px;
+        }
+        .params-title {
+            font-size: 1.5rem;
+            color: #34495e;
+            margin-bottom: 20px;
+        }
+        .params-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+        .param-item {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+        }
+        .actions {
+            text-align: center;
+            margin-top: 40px;
+        }
+        .process-btn {
+            padding: 18px 50px;
+            font-size: 1.3rem;
+            border-radius: 50px;
+            background: linear-gradient(90deg, #3498db, #2ecc71);
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 6px 20px rgba(52, 152, 219, 0.3);
+        }
+        .process-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 8px 25px rgba(52, 152, 219, 0.5);
+        }
+        .process-btn:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        .progress-section {
+            margin-top: 40px;
+        }
+        .progress-title {
+            font-size: 1.5rem;
+            color: #34495e;
+            margin-bottom: 20px;
+        }
+        .progress-bar {
+            height: 20px;
+            background: #ecf0f1;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 15px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #2ecc71, #3498db);
+            border-radius: 10px;
+            transition: width 0.5s ease;
+        }
+        .progress-text {
+            text-align: center;
+            color: #7f8c8d;
+            font-size: 1rem;
+        }
+        .result-section {
+            margin-top: 40px;
+            text-align: center;
+        }
+        .result-title {
+            font-size: 1.5rem;
+            color: #34495e;
+            margin-bottom: 20px;
+        }
+        .video-preview {
+            max-width: 800px;
+            margin: 0 auto;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        .download-btn {
+            margin-top: 25px;
+            padding: 15px 40px;
+            font-size: 1.2rem;
+            border-radius: 50px;
+            background: linear-gradient(90deg, #e74c3c, #e67e22);
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 6px 20px rgba(231, 76, 60, 0.3);
+        }
+        .download-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 8px 25px rgba(231, 76, 60, 0.5);
+        }
+        .footer {
+            text-align: center;
+            margin-top: 50px;
+            color: #95a5a6;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="container">
+            <div class="header">
+                <h1>基于语义对齐的自动视频生成</h1>
+                <p>上传PPTX、MP3和SRT文件，系统将自动生成随语音内容切换页面的视频</p>
+            </div>
+
+            <div class="upload-section">
+                <div class="upload-title">
+                    <i class="el-icon-upload"></i>
+                    <span>文件上传</span>
+                </div>
+                <div class="upload-grid">
+                    <div class="upload-card">
+                        <h3>PPTX演示文稿</h3>
+                        <el-upload
+                            class="upload-demo"
+                            drag
+                            :auto-upload="false"
+                            :on-change="handlePPTXChange"
+                            :show-file-list="false"
+                            accept=".pptx"
+                        >
+                            <i class="el-icon-upload"></i>
+                            <div class="el-upload__text">将PPTX文件拖到此处，或<em>点击上传</em></div>
+                        </el-upload>
+                        <div class="file-list">
+                            <div v-for="file in pptxFiles" :key="file.name" class="file-item">
+                                <span class="file-name">{{ file.name }}</span>
+                                <span class="file-size">{{ formatFileSize(file.size) }}</span>
+                                <span class="remove-btn" @click="removeFile('pptx', file)">×</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="upload-card">
+                        <h3>音频文件（支持MP3/WAV）</h3>
+                        <el-upload
+                            class="upload-demo"
+                            drag
+                            :auto-upload="false"
+                            :on-change="handleMP3Change"
+                            :show-file-list="false"
+                            accept=".mp3,.wav,.wave"
+                        >
+                            <i class="el-icon-upload"></i>
+                            <div class="el-upload__text">将音频文件拖到此处（支持MP3/WAV），或<em>点击上传</em></div>
+                        </el-upload>
+                        <div class="file-list">
+                            <div v-for="file in mp3Files" :key="file.name" class="file-item">
+                                <span class="file-name">{{ file.name }}</span>
+                                <span class="file-size">{{ formatFileSize(file.size) }}</span>
+                                <span class="remove-btn" @click="removeFile('mp3', file)">×</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="upload-card">
+                        <h3>SRT字幕文件</h3>
+                        <el-upload
+                            class="upload-demo"
+                            drag
+                            :auto-upload="false"
+                            :on-change="handleSRTChange"
+                            :show-file-list="false"
+                            accept=".srt"
+                        >
+                            <i class="el-icon-upload"></i>
+                            <div class="el-upload__text">将SRT文件拖到此处，或<em>点击上传</em></div>
+                        </el-upload>
+                        <div class="file-list">
+                            <div v-for="file in srtFiles" :key="file.name" class="file-item">
+                                <span class="file-name">{{ file.name }}</span>
+                                <span class="file-size">{{ formatFileSize(file.size) }}</span>
+                                <span class="remove-btn" @click="removeFile('srt', file)">×</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="params-section">
+                <div class="params-title">
+                    <i class="el-icon-setting"></i>
+                    <span>处理参数</span>
+                </div>
+                <div class="params-grid">
+                    <div class="param-item">
+                        <h3>相似度阈值</h3>
+                        <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">字幕与PPT页面的最小相似度，低于此值将忽略匹配</p>
+                        <el-slider v-model="similarityThreshold" :min="0" :max="1" :step="0.05" show-input></el-slider>
+                    </div>
+                    <div class="param-item">
+                        <h3>最小展示时长（秒）</h3>
+                        <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">每个PPT页面至少展示的时长</p>
+                        <el-slider v-model="minDisplayDuration" :min="1" :max="10" :step="0.5" show-input></el-slider>
+                    </div>
+                    <div class="param-item">
+                        <h3>输出分辨率</h3>
+                        <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">生成视频的分辨率</p>
+                        <el-select v-model="outputResolution" placeholder="选择分辨率">
+                            <el-option label="1920x1080 (Full HD)" value="1920x1080"></el-option>
+                            <el-option label="1280x720 (HD)" value="1280x720"></el-option>
+                            <el-option label="1024x576" value="1024x576"></el-option>
+                        </el-select>
+                    </div>
+                </div>
+            </div>
+
+            <div class="actions">
+                <button class="process-btn" @click="startProcessing" :disabled="processing || !filesReady">
+                    {{ processing ? '处理中...' : '开始生成视频' }}
+                </button>
+            </div>
+
+            <div v-if="processing" class="progress-section">
+                <div class="progress-title">
+                    <i class="el-icon-loading"></i>
+                    <span>处理进度</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" :style="{ width: progress + '%' }"></div>
+                </div>
+                <div class="progress-text">{{ progressText }}</div>
+            </div>
+
+            <div v-if="resultVideoUrl" class="result-section">
+                <div class="result-title">
+                    <i class="el-icon-video-play"></i>
+                    <span>生成结果</span>
+                </div>
+                <div class="video-preview">
+                    <video :src="resultVideoUrl" controls width="100%"></video>
+                </div>
+                <a :href="resultVideoUrl" :download="resultVideoFilename">
+                    <button class="download-btn">下载视频</button>
+                </a>
+            </div>
+
+            <div class="footer">
+                <p>基于语义对齐的自动视频生成系统 &copy; 2026</p>
+                <p>使用 python-pptx、sentence-transformers 和 FFmpeg 构建</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, computed, onMounted } = Vue;
+        const { ElMessage, ElLoading } = ElementPlus;
+
+        createApp({
+            setup() {
+                // 文件列表
+                const pptxFiles = ref([]);
+                const mp3Files = ref([]);
+                const srtFiles = ref([]);
+
+                // 参数
+                const similarityThreshold = ref(0.5);
+                const minDisplayDuration = ref(2.0);
+                const outputResolution = ref('1920x1080');
+
+                // 处理状态
+                const processing = ref(false);
+                const progress = ref(0);
+                const progressText = ref('');
+                const resultVideoUrl = ref('');
+                const resultVideoFilename = ref('generated_video.mp4');
+                const taskId = ref('');
+                const hasShownSuccess = ref(false);
+
+                // 计算是否准备好
+                const filesReady = computed(() => {
+                    return pptxFiles.value.length > 0 && mp3Files.value.length > 0 && srtFiles.value.length > 0;
+                });
+
+                // 文件处理
+                const handlePPTXChange = (file) => {
+                    pptxFiles.value = [file.raw];
+                };
+                const handleMP3Change = (file) => {
+                    mp3Files.value = [file.raw];
+                };
+                const handleSRTChange = (file) => {
+                    srtFiles.value = [file.raw];
+                };
+                const removeFile = (type, file) => {
+                    if (type === 'pptx') {
+                        pptxFiles.value = pptxFiles.value.filter(f => f !== file);
+                    } else if (type === 'mp3') {
+                        mp3Files.value = mp3Files.value.filter(f => f !== file);
+                    } else if (type === 'srt') {
+                        srtFiles.value = srtFiles.value.filter(f => f !== file);
+                    }
+                };
+                const formatFileSize = (bytes) => {
+                    if (bytes === 0) return '0 B';
+                    const k = 1024;
+                    const sizes = ['B', 'KB', 'MB', 'GB'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(k));
+                    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+                };
+                
+                // 播放提示音效
+                const playNotificationSound = () => {
+                    try {
+                        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                        const oscillator = audioContext.createOscillator();
+                        const gainNode = audioContext.createGain();
+                        
+                        oscillator.connect(gainNode);
+                        gainNode.connect(audioContext.destination);
+                        
+                        oscillator.frequency.value = 800;
+                        oscillator.type = 'sine';
+                        
+                        gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+                        
+                        oscillator.start(audioContext.currentTime);
+                        oscillator.stop(audioContext.currentTime + 0.5);
+                    } catch (error) {
+                        console.log('音效播放失败:', error);
+                        // 静默失败，不影响主要功能
+                    }
+                };
+
+                // 开始处理
+                const startProcessing = async () => {
+                    if (!filesReady.value) {
+                        ElMessage.error('请上传所有必需文件');
+                        return;
+                    }
+
+                    processing.value = true;
+                    progress.value = 0;
+                    progressText.value = '准备上传文件...';
+                    hasShownSuccess.value = false;
+
+                    const formData = new FormData();
+                    formData.append('pptx', pptxFiles.value[0]);
+                    formData.append('mp3', mp3Files.value[0]);
+                    formData.append('srt', srtFiles.value[0]);
+                    formData.append('similarity_threshold', similarityThreshold.value);
+                    formData.append('min_display_duration', minDisplayDuration.value);
+                    formData.append('output_resolution', outputResolution.value);
+
+                    try {
+                        // 上传文件并启动任务
+                        const uploadResponse = await axios.post('/api/upload', formData, {
+                            headers: { 'Content-Type': 'multipart/form-data' },
+                            onUploadProgress: (progressEvent) => {
+                                const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                                progress.value = percent * 0.3; // 上传占30%
+                                progressText.value = `上传文件中... ${percent}%`;
+                            }
+                        });
+
+                        taskId.value = uploadResponse.data.task_id;
+                        progress.value = 30;
+                        progressText.value = '文件上传成功，开始处理...';
+
+                        // 轮询任务状态
+                        const pollInterval = setInterval(async () => {
+                            try {
+                                const statusResponse = await axios.get(`/api/task/${taskId.value}/status`);
+                                const status = statusResponse.data;
+                                
+                                progress.value = 30 + Math.floor(status.progress * 0.7); // 处理占70%
+                                progressText.value = status.message;
+
+                                if (status.state === 'completed' && !hasShownSuccess.value) {
+                                    hasShownSuccess.value = true;
+                                    clearInterval(pollInterval);
+                                    progress.value = 100;
+                                    progressText.value = '处理完成！';
+                                    processing.value = false;
+                                    
+                                    // 获取任务预览信息（包含视频URL和文件名）
+                                    const previewResponse = await axios.get(`/api/task/${taskId.value}/preview`);
+                                    resultVideoUrl.value = previewResponse.data.video_url;
+                                    resultVideoFilename.value = previewResponse.data.filename;
+                                    ElMessage.success('视频生成成功！');
+                                    playNotificationSound();
+                                } else if (status.state === 'failed') {
+                                    clearInterval(pollInterval);
+                                    processing.value = false;
+                                    ElMessage.error(`处理失败: ${status.error}`);
+                                }
+                            } catch (error) {
+                                console.error('轮询错误:', error);
+                            }
+                        }, 2000);
+
+                    } catch (error) {
+                        console.error('上传错误:', error);
+                        processing.value = false;
+                        ElMessage.error('上传失败: ' + (error.response?.data?.detail || error.message));
+                    }
+                };
+
+                return {
+                    pptxFiles,
+                    mp3Files,
+                    srtFiles,
+                    similarityThreshold,
+                    minDisplayDuration,
+                    outputResolution,
+                    processing,
+                    progress,
+                    progressText,
+                    resultVideoUrl,
+                    resultVideoFilename,
+                    filesReady,
+                    handlePPTXChange,
+                    handleMP3Change,
+                    handleSRTChange,
+                    removeFile,
+                    formatFileSize,
+                    startProcessing
+                };
+            }
+        }).use(ElementPlus).mount('#app');
+    </script>
+</body>
+</html>
