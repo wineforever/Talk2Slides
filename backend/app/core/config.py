@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     ALIGN_SWITCH_PENALTY: float = 0.08
     ALIGN_BACKTRACK_PENALTY: float = 0.15
     ALIGN_FORWARD_JUMP_PENALTY: float = 0.03
+    ALIGN_SWITCH_DELAY_MS: int = 250
+    ALIGN_PAUSE_SWITCH_THRESHOLD_SEC: float = 1.2
+    ALIGN_SEMANTIC_WEIGHT: float = 0.70
+    ALIGN_LEXICAL_WEIGHT: float = 0.22
+    ALIGN_NUMERIC_WEIGHT: float = 0.08
+    ALIGN_LOW_CONFIDENCE_MARGIN: float = 0.08
+    ALIGN_BOUNDARY_CROSS_MIN: float = 0.02
+    ALIGN_ENFORCE_NO_REVISIT: bool = True
+    ALIGN_MIN_SLIDE_USAGE_RATIO: float = 0.70
     ALIGN_ENFORCE_SEQUENTIAL: bool = False
     ALIGN_REQUIRE_FULL_COVERAGE: bool = False
     ALIGN_KEEP_SHORT_SEGMENTS_FOR_COVERAGE: bool = False
@@ -45,6 +54,7 @@ class Settings(BaseSettings):
     DEFAULT_OUTPUT_RESOLUTION: str = "1920x1080"
     PPT_EXPORT_DPI: int = 300
     VIDEO_FORCE_FIRST_SLIDE_FRAME: bool = True
+    VIDEO_FORCE_LAST_SLIDE_TAIL_SEC: float = 5.0
     
     # 外部工具路径
     FFMPEG_PATH: str = Field(

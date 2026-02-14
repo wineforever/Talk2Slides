@@ -1,621 +1,830 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>基于语义对齐的自动视频生成</title>
-    <!-- Element Plus CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
-    <!-- Vue 3 -->
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Talk2Slides - 语义对齐视频生成</title>
+    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <!-- Element Plus JS -->
     <script src="https://unpkg.com/element-plus"></script>
-    <!-- Axios -->
     <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+            background: linear-gradient(135deg, #f2f5fb 0%, #dfe7f2 100%);
             min-height: 100vh;
-            padding: 20px;
+            padding: 24px;
+            color: #2c3e50;
         }
         .container {
             max-width: 1200px;
             margin: 0 auto;
-            background: white;
+            background: #fff;
             border-radius: 16px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-            padding: 40px;
+            box-shadow: 0 10px 32px rgba(0, 0, 0, 0.08);
+            padding: 28px;
         }
-        .header {
-            text-align: center;
-            margin-bottom: 40px;
+        .header { text-align: center; margin-bottom: 28px; }
+        .header h1 { font-size: 32px; margin-bottom: 8px; }
+        .header p { color: #64748b; }
+
+        .section-title {
+            font-size: 22px;
+            margin-bottom: 14px;
+            color: #1f2937;
+            font-weight: 700;
         }
-        .header h1 {
-            color: #2c3e50;
-            font-size: 2.8rem;
-            margin-bottom: 10px;
-        }
-        .header p {
-            color: #7f8c8d;
-            font-size: 1.2rem;
-        }
-        .upload-section {
-            background: #f8f9fa;
+
+        .upload-section,
+        .params-section,
+        .result-section {
+            background: #f8fafc;
+            border: 1px solid #e8edf5;
             border-radius: 12px;
-            padding: 30px;
-            margin-bottom: 30px;
+            padding: 18px;
+            margin-bottom: 18px;
         }
-        .upload-title {
-            font-size: 1.5rem;
-            color: #34495e;
-            margin-bottom: 20px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .upload-title i {
-            color: #3498db;
-        }
-        .upload-grid {
+
+        .upload-grid,
+        .params-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 25px;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 14px;
         }
-        .upload-card {
-            background: white;
+
+        .upload-card,
+        .param-item {
+            background: #fff;
+            border: 1px solid #e8edf5;
             border-radius: 10px;
-            padding: 25px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
-            transition: transform 0.3s ease;
+            padding: 14px;
         }
-        .upload-card:hover {
-            transform: translateY(-5px);
+
+        .upload-card h3,
+        .param-item h3 {
+            font-size: 16px;
+            margin-bottom: 10px;
+            color: #111827;
         }
-        .upload-card h3 {
-            color: #2c3e50;
-            margin-bottom: 15px;
-            font-size: 1.3rem;
+
+        .tip {
+            font-size: 12px;
+            color: #64748b;
+            margin-bottom: 10px;
+            line-height: 1.5;
         }
-        .file-list {
-            margin-top: 15px;
-            max-height: 150px;
-            overflow-y: auto;
-        }
+
+        .file-list { margin-top: 10px; }
         .file-item {
             display: flex;
-            justify-content: space-between;
             align-items: center;
-            padding: 8px 12px;
-            background: #f1f8ff;
+            gap: 8px;
+            background: #f1f5f9;
             border-radius: 6px;
-            margin-bottom: 8px;
+            padding: 6px 8px;
+            margin-bottom: 6px;
+            font-size: 13px;
         }
         .file-name {
-            font-size: 0.9rem;
-            color: #2c3e50;
+            flex: 1;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-            flex: 1;
-        }
-        .file-size {
-            font-size: 0.8rem;
-            color: #7f8c8d;
-            margin-left: 10px;
         }
         .remove-btn {
-            color: #e74c3c;
+            color: #dc2626;
             cursor: pointer;
-            margin-left: 10px;
+            font-weight: 700;
+            user-select: none;
         }
-        .params-section {
-            margin-bottom: 30px;
-        }
-        .params-title {
-            font-size: 1.5rem;
-            color: #34495e;
-            margin-bottom: 20px;
-        }
-        .params-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
-        }
-        .param-item {
-            background: #f8f9fa;
-            border-radius: 10px;
-            padding: 20px;
-        }
-        .advanced-collapse {
-            margin-top: 15px;
-        }
-        .advanced-collapse .el-collapse-item__header {
-            font-weight: 600;
-            color: #34495e;
-        }
+
         .actions {
             text-align: center;
-            margin-top: 40px;
+            margin: 22px 0;
         }
         .process-btn {
-            padding: 18px 50px;
-            font-size: 1.3rem;
-            border-radius: 50px;
-            background: linear-gradient(90deg, #3498db, #2ecc71);
-            color: white;
             border: none;
+            border-radius: 999px;
+            padding: 14px 36px;
+            font-size: 18px;
+            color: white;
             cursor: pointer;
-            transition: all 0.3s ease;
-            box-shadow: 0 6px 20px rgba(52, 152, 219, 0.3);
-        }
-        .process-btn:hover {
-            transform: scale(1.05);
-            box-shadow: 0 8px 25px rgba(52, 152, 219, 0.5);
+            background: linear-gradient(90deg, #0ea5e9, #22c55e);
+            box-shadow: 0 8px 22px rgba(14, 165, 233, 0.28);
         }
         .process-btn:disabled {
-            background: #bdc3c7;
             cursor: not-allowed;
-            transform: none;
+            background: #94a3b8;
             box-shadow: none;
         }
-        .progress-section {
-            margin-top: 40px;
-        }
-        .progress-title {
-            font-size: 1.5rem;
-            color: #34495e;
-            margin-bottom: 20px;
-        }
-        .progress-bar {
-            height: 20px;
-            background: #ecf0f1;
-            border-radius: 10px;
-            overflow: hidden;
-            margin-bottom: 15px;
-        }
-        .progress-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #2ecc71, #3498db);
-            border-radius: 10px;
-            transition: width 0.5s ease;
-        }
-        .progress-text {
-            text-align: center;
-            color: #7f8c8d;
-            font-size: 1rem;
-        }
-        .result-section {
-            margin-top: 40px;
-            text-align: center;
-        }
-        .result-title {
-            font-size: 1.5rem;
-            color: #34495e;
-            margin-bottom: 20px;
-        }
+
         .video-preview {
-            max-width: 800px;
+            max-width: 860px;
             margin: 0 auto;
             border-radius: 12px;
             overflow: hidden;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
         }
+        .playback-progress-wrap {
+            max-width: 860px;
+            margin: 12px auto 0;
+        }
+        .playback-track {
+            position: relative;
+            height: 16px;
+            border-radius: 999px;
+            overflow: hidden;
+            background: rgba(15, 23, 42, 0.18);
+            border: 1px solid rgba(148, 163, 184, 0.45);
+            backdrop-filter: blur(1px);
+        }
+        .playback-segments {
+            display: flex;
+            height: 100%;
+            width: 100%;
+        }
+        .playback-segment {
+            height: 100%;
+            border-right: 1px solid rgba(255, 255, 255, 0.45);
+            background: rgba(148, 163, 184, 0.22);
+        }
+        .playback-segment:last-child { border-right: none; }
+        .playback-fill {
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, rgba(14, 165, 233, 0.55), rgba(34, 197, 94, 0.55));
+            transition: width 0.12s linear;
+            pointer-events: none;
+        }
+        .playback-thumb {
+            position: absolute;
+            top: -2px;
+            bottom: -2px;
+            width: 2px;
+            background: rgba(15, 23, 42, 0.85);
+            box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.65);
+            transform: translateX(-1px);
+            pointer-events: none;
+        }
+        .playback-label-row {
+            display: flex;
+            margin-top: 8px;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #e2e8f0;
+            background: rgba(248, 250, 252, 0.85);
+        }
+        .playback-label-item {
+            padding: 4px 6px;
+            font-size: 11px;
+            color: #475569;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            border-right: 1px solid #e2e8f0;
+        }
+        .playback-label-item:last-child { border-right: none; }
+        .playback-label-item.active {
+            color: #0f172a;
+            font-weight: 700;
+            background: rgba(59, 130, 246, 0.10);
+        }
+        .playback-time {
+            margin-top: 6px;
+            text-align: right;
+            color: #64748b;
+            font-size: 12px;
+        }
+        .download-wrap { margin-top: 14px; text-align: center; }
         .download-btn {
-            margin-top: 25px;
-            padding: 15px 40px;
-            font-size: 1.2rem;
-            border-radius: 50px;
-            background: linear-gradient(90deg, #e74c3c, #e67e22);
-            color: white;
             border: none;
+            border-radius: 999px;
+            padding: 12px 26px;
+            font-size: 16px;
+            color: white;
             cursor: pointer;
-            transition: all 0.3s ease;
-            box-shadow: 0 6px 20px rgba(231, 76, 60, 0.3);
+            background: linear-gradient(90deg, #ef4444, #f97316);
         }
-        .download-btn:hover {
-            transform: scale(1.05);
-            box-shadow: 0 8px 25px rgba(231, 76, 60, 0.5);
+
+        .quality-section {
+            margin-top: 16px;
+            background: #fff;
+            border: 1px solid #e8edf5;
+            border-radius: 10px;
+            padding: 12px;
         }
+        .quality-title { font-size: 16px; font-weight: 700; margin-bottom: 10px; }
+        .quality-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 10px;
+        }
+        .quality-item {
+            border: 1px solid #e8edf5;
+            border-radius: 8px;
+            padding: 8px;
+            background: #f8fafc;
+        }
+        .quality-item .label { color: #64748b; font-size: 12px; margin-bottom: 4px; }
+        .quality-item .value { color: #111827; font-weight: 700; font-size: 14px; }
+
         .footer {
             text-align: center;
-            margin-top: 50px;
-            color: #95a5a6;
-            font-size: 0.9rem;
+            color: #94a3b8;
+            font-size: 12px;
+            margin-top: 8px;
         }
     </style>
 </head>
 <body>
-    <div id="app">
-        <div class="container">
-            <div class="header">
-                <h1>基于语义对齐的自动视频生成</h1>
-                <p>上传PPTX、MP3和SRT文件，系统将自动生成随语音内容切换页面的视频</p>
-            </div>
+<div id="app">
+    <div class="container">
+        <div class="header">
+            <h1>Talk2Slides</h1>
+            <p>上传 PPTX + 音频 + SRT，自动生成按语义切页的视频</p>
+        </div>
 
-            <div class="upload-section">
-                <div class="upload-title">
-                    <i class="el-icon-upload"></i>
-                    <span>文件上传</span>
+        <div class="upload-section">
+            <div class="section-title">文件上传</div>
+            <div class="upload-grid">
+                <div class="upload-card">
+                    <h3>PPTX 文件</h3>
+                    <el-upload drag :auto-upload="false" :on-change="handlePPTXChange" :show-file-list="false" accept=".pptx">
+                        <i class="el-icon-upload"></i>
+                        <div class="el-upload__text">拖拽到此处，或点击上传</div>
+                    </el-upload>
+                    <div class="file-list" v-if="pptxFiles.length">
+                        <div class="file-item" v-for="file in pptxFiles" :key="file.name + file.size">
+                            <span class="file-name">{{ file.name }}</span>
+                            <span>{{ formatFileSize(file.size) }}</span>
+                            <span class="remove-btn" @click="removeFile('pptx', file)">×</span>
+                        </div>
+                    </div>
                 </div>
-                <div class="upload-grid">
-                    <div class="upload-card">
-                        <h3>PPTX演示文稿</h3>
-                        <el-upload
-                            class="upload-demo"
-                            drag
-                            :auto-upload="false"
-                            :on-change="handlePPTXChange"
-                            :show-file-list="false"
-                            accept=".pptx"
-                        >
-                            <i class="el-icon-upload"></i>
-                            <div class="el-upload__text">将PPTX文件拖到此处，或<em>点击上传</em></div>
-                        </el-upload>
-                        <div class="file-list">
-                            <div v-for="file in pptxFiles" :key="file.name" class="file-item">
-                                <span class="file-name">{{ file.name }}</span>
-                                <span class="file-size">{{ formatFileSize(file.size) }}</span>
-                                <span class="remove-btn" @click="removeFile('pptx', file)">×</span>
-                            </div>
+
+                <div class="upload-card">
+                    <h3>音频文件（MP3/WAV）</h3>
+                    <el-upload drag :auto-upload="false" :on-change="handleMP3Change" :show-file-list="false" accept=".mp3,.wav,.wave">
+                        <i class="el-icon-upload"></i>
+                        <div class="el-upload__text">拖拽到此处，或点击上传</div>
+                    </el-upload>
+                    <div class="file-list" v-if="mp3Files.length">
+                        <div class="file-item" v-for="file in mp3Files" :key="file.name + file.size">
+                            <span class="file-name">{{ file.name }}</span>
+                            <span>{{ formatFileSize(file.size) }}</span>
+                            <span class="remove-btn" @click="removeFile('mp3', file)">×</span>
                         </div>
                     </div>
+                </div>
 
-                    <div class="upload-card">
-                        <h3>音频文件（支持MP3/WAV）</h3>
-                        <el-upload
-                            class="upload-demo"
-                            drag
-                            :auto-upload="false"
-                            :on-change="handleMP3Change"
-                            :show-file-list="false"
-                            accept=".mp3,.wav,.wave"
-                        >
-                            <i class="el-icon-upload"></i>
-                            <div class="el-upload__text">将音频文件拖到此处（支持MP3/WAV），或<em>点击上传</em></div>
-                        </el-upload>
-                        <div class="file-list">
-                            <div v-for="file in mp3Files" :key="file.name" class="file-item">
-                                <span class="file-name">{{ file.name }}</span>
-                                <span class="file-size">{{ formatFileSize(file.size) }}</span>
-                                <span class="remove-btn" @click="removeFile('mp3', file)">×</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="upload-card">
-                        <h3>SRT字幕文件</h3>
-                        <el-upload
-                            class="upload-demo"
-                            drag
-                            :auto-upload="false"
-                            :on-change="handleSRTChange"
-                            :show-file-list="false"
-                            accept=".srt"
-                        >
-                            <i class="el-icon-upload"></i>
-                            <div class="el-upload__text">将SRT文件拖到此处，或<em>点击上传</em></div>
-                        </el-upload>
-                        <div class="file-list">
-                            <div v-for="file in srtFiles" :key="file.name" class="file-item">
-                                <span class="file-name">{{ file.name }}</span>
-                                <span class="file-size">{{ formatFileSize(file.size) }}</span>
-                                <span class="remove-btn" @click="removeFile('srt', file)">×</span>
-                            </div>
+                <div class="upload-card">
+                    <h3>SRT 字幕</h3>
+                    <el-upload drag :auto-upload="false" :on-change="handleSRTChange" :show-file-list="false" accept=".srt">
+                        <i class="el-icon-upload"></i>
+                        <div class="el-upload__text">拖拽到此处，或点击上传</div>
+                    </el-upload>
+                    <div class="file-list" v-if="srtFiles.length">
+                        <div class="file-item" v-for="file in srtFiles" :key="file.name + file.size">
+                            <span class="file-name">{{ file.name }}</span>
+                            <span>{{ formatFileSize(file.size) }}</span>
+                            <span class="remove-btn" @click="removeFile('srt', file)">×</span>
                         </div>
                     </div>
                 </div>
             </div>
+        </div>
 
-            <div class="params-section">
-                <div class="params-title">
-                    <i class="el-icon-setting"></i>
-                    <span>处理参数</span>
+        <div class="params-section">
+            <div class="section-title">处理参数</div>
+            <div class="params-grid">
+                <div class="param-item">
+                    <h3>相似度阈值</h3>
+                    <p class="tip">字幕与页面的最低匹配阈值</p>
+                    <el-slider v-model="similarityThreshold" :min="0" :max="1" :step="0.05" show-input></el-slider>
                 </div>
-                <div class="params-grid">
-                    <div class="param-item">
-                        <h3>相似度阈值</h3>
-                        <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">字幕与PPT页面的最小相似度，低于此值将忽略匹配</p>
-                        <el-slider v-model="similarityThreshold" :min="0" :max="1" :step="0.05" show-input></el-slider>
-                    </div>
-                    <div class="param-item">
-                        <h3>最小展示时长（秒）</h3>
-                        <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">每个PPT页面至少展示的时长</p>
-                        <el-slider v-model="minDisplayDuration" :min="1" :max="10" :step="0.5" show-input></el-slider>
-                    </div>
-                    <div class="param-item">
-                        <h3>输出分辨率</h3>
-                        <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">生成视频的分辨率</p>
-                        <el-select v-model="outputResolution" placeholder="选择分辨率">
-                            <el-option label="1920x1080 (Full HD)" value="1920x1080"></el-option>
-                            <el-option label="1280x720 (HD)" value="1280x720"></el-option>
-                            <el-option label="1024x576" value="1024x576"></el-option>
-                        </el-select>
-                    </div>
+                <div class="param-item">
+                    <h3>最短展示时长（秒）</h3>
+                    <p class="tip">每个页面至少展示多久</p>
+                    <el-slider v-model="minDisplayDuration" :min="1" :max="10" :step="0.5" show-input></el-slider>
                 </div>
-                <el-collapse v-model="advancedParamsOpen" class="advanced-collapse">
-                    <el-collapse-item title="高级参数（展开可调）" name="advanced">
-                        <div class="params-grid">
-                            <div class="param-item">
-                                <h3>字幕合并间隔（秒）</h3>
-                                <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">相邻字幕间隔小于该值会合并，减少过早切页</p>
-                                <el-slider v-model="srtMergeGapSec" :min="0.2" :max="2.0" :step="0.1" show-input></el-slider>
-                            </div>
-                            <div class="param-item">
-                                <h3>字幕最小时长（秒）</h3>
-                                <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">过滤过短片段，降低频繁切换</p>
-                                <el-slider v-model="srtMinDurationSec" :min="0.5" :max="3.0" :step="0.1" show-input></el-slider>
-                            </div>
-                            <div class="param-item">
-                                <h3>最大前跳页数</h3>
-                                <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">限制一次最多向后跳过的页数，越小越稳</p>
-                                <el-slider v-model="alignMaxForwardJump" :min="0" :max="5" :step="1" show-input></el-slider>
-                            </div>
-                            <div class="param-item">
-                                <h3>最大回退页数</h3>
-                                <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">限制向前回退的最大页数</p>
-                                <el-slider v-model="alignMaxBacktrack" :min="0" :max="3" :step="1" show-input></el-slider>
-                            </div>
-                            <div class="param-item">
-                                <h3>切换惩罚</h3>
-                                <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">提高可减少过早切页</p>
-                                <el-slider v-model="alignSwitchPenalty" :min="0" :max="0.5" :step="0.01" show-input></el-slider>
-                            </div>
-                            <div class="param-item">
-                                <h3>前跳惩罚</h3>
-                                <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">提高可抑制提前跳到后面页</p>
-                                <el-slider v-model="alignForwardJumpPenalty" :min="0" :max="0.2" :step="0.01" show-input></el-slider>
-                            </div>
-                            <div class="param-item">
-                                <h3>页面顺序约束</h3>
-                                <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">默认不限制。勾选后将禁止跳页并按顺序讲解。</p>
-                                <el-checkbox v-model="alignEnforceSequential">禁止跳页（顺序讲每页）</el-checkbox>
-                            </div>
+                <div class="param-item">
+                    <h3>输出分辨率</h3>
+                    <p class="tip">视频输出尺寸</p>
+                    <el-select v-model="outputResolution" style="width: 100%;">
+                        <el-option label="1920x1080 (Full HD)" value="1920x1080"></el-option>
+                        <el-option label="1280x720 (HD)" value="1280x720"></el-option>
+                        <el-option label="1024x576" value="1024x576"></el-option>
+                    </el-select>
+                </div>
+            </div>
+
+            <el-collapse v-model="advancedParamsOpen" style="margin-top: 12px;">
+                <el-collapse-item title="高级参数" name="advanced">
+                    <div class="params-grid">
+                        <div class="param-item">
+                            <h3>字幕合并间隔（秒）</h3>
+                            <p class="tip">间隔小于该值时会合并字幕块</p>
+                            <el-slider v-model="srtMergeGapSec" :min="0.2" :max="2.0" :step="0.1" show-input></el-slider>
                         </div>
-                    </el-collapse-item>
-                </el-collapse>
-            </div>
+                        <div class="param-item">
+                            <h3>字幕最短时长（秒）</h3>
+                            <p class="tip">过滤过短片段，减少过密切页</p>
+                            <el-slider v-model="srtMinDurationSec" :min="0.5" :max="3.0" :step="0.1" show-input></el-slider>
+                        </div>
+                        <div class="param-item">
+                            <h3>最大前跳页数</h3>
+                            <p class="tip">每次最多允许向后跳过几页</p>
+                            <el-slider v-model="alignMaxForwardJump" :min="0" :max="5" :step="1" show-input></el-slider>
+                        </div>
+                        <div class="param-item">
+                            <h3>最大回退页数</h3>
+                            <p class="tip">每次最多允许向前回退几页</p>
+                            <el-slider v-model="alignMaxBacktrack" :min="0" :max="3" :step="1" show-input></el-slider>
+                        </div>
+                        <div class="param-item">
+                            <h3>切换惩罚</h3>
+                            <p class="tip">提高可减少过早切页</p>
+                            <el-slider v-model="alignSwitchPenalty" :min="0" :max="0.5" :step="0.01" show-input></el-slider>
+                        </div>
+                        <div class="param-item">
+                            <h3>前跳惩罚</h3>
+                            <p class="tip">提高可抑制提前跳到后面页</p>
+                            <el-slider v-model="alignForwardJumpPenalty" :min="0" :max="0.2" :step="0.01" show-input></el-slider>
+                        </div>
+                        <div class="param-item">
+                            <h3>切页延迟（毫秒）</h3>
+                            <p class="tip">切页时间向后偏移，减少“抢话”</p>
+                            <el-slider v-model="alignSwitchDelayMs" :min="0" :max="1000" :step="50" show-input></el-slider>
+                        </div>
+                        <div class="param-item">
+                            <h3>禁止回访已讲页</h3>
+                            <p class="tip">允许乱序，但不允许回到已经讲过的页</p>
+                            <el-checkbox v-model="alignEnforceNoRevisit">启用</el-checkbox>
+                        </div>
+                        <div class="param-item">
+                            <h3>最少页面覆盖率</h3>
+                            <p class="tip">希望至少覆盖多少比例的页面</p>
+                            <el-slider v-model="alignMinSlideUsageRatio" :min="0.5" :max="1.0" :step="0.05" show-input></el-slider>
+                        </div>
+                        <div class="param-item">
+                            <h3>禁止跳页（顺序讲每页）</h3>
+                            <p class="tip">可选项，默认不勾选</p>
+                            <el-checkbox v-model="alignEnforceSequential">启用</el-checkbox>
+                        </div>
+                    </div>
+                </el-collapse-item>
+            </el-collapse>
+        </div>
 
-            <div class="actions">
-                <button class="process-btn" @click="startProcessing" :disabled="processing || !filesReady">
-                    {{ processing ? '处理中...' : '开始生成视频' }}
-                </button>
-            </div>
+        <div class="actions">
+            <button class="process-btn" @click="startProcessing" :disabled="processing || !filesReady">
+                {{ processing ? '处理中...' : '开始生成视频' }}
+            </button>
+        </div>
 
-            <div v-if="processing" class="progress-section">
-                <div class="progress-title">
-                    <i class="el-icon-loading"></i>
-                    <span>处理进度</span>
-                </div>
-                <div class="progress-bar">
-                    <div class="progress-fill" :style="{ width: progress + '%' }"></div>
-                </div>
-                <div class="progress-text">{{ progressText }}</div>
+        <div v-if="resultVideoUrl" class="result-section">
+            <div class="section-title">生成结果</div>
+            <div class="video-preview">
+                <video
+                    ref="resultVideoEl"
+                    :src="resultVideoUrl"
+                    controls
+                    width="100%"
+                    @loadedmetadata="onVideoLoadedMetadata"
+                    @timeupdate="onVideoTimeUpdate"
+                    @seeked="onVideoTimeUpdate"
+                ></video>
             </div>
-
-            <div v-if="resultVideoUrl" class="result-section">
-                <div class="result-title">
-                    <i class="el-icon-video-play"></i>
-                    <span>生成结果</span>
-                </div>
-                <div class="video-preview">
-                    <video :src="resultVideoUrl" controls width="100%"></video>
-                </div>
+            <div class="download-wrap">
                 <a :href="resultVideoUrl" :download="resultVideoFilename">
                     <button class="download-btn">下载视频</button>
                 </a>
             </div>
 
-            <div class="footer">
-                <p>基于语义对齐的自动视频生成系统 &copy; 2026</p>
-                <p>使用 python-pptx、sentence-transformers 和 FFmpeg 构建</p>
+            <div v-if="alignmentReport && alignmentReport.summary" class="quality-section">
+                <div class="quality-title">对齐质量报告</div>
+                <div class="quality-grid">
+                    <div class="quality-item">
+                        <div class="label">质量评级</div>
+                        <div class="value">{{ alignmentReport.summary.grade }} ({{ alignmentReport.summary.health_score }})</div>
+                    </div>
+                    <div class="quality-item">
+                        <div class="label">页面覆盖率</div>
+                        <div class="value">{{ alignmentReport.summary.unique_slides_used }}/{{ alignmentReport.summary.total_slides || '-' }} ({{ formatPercent(alignmentReport.summary.slide_coverage_ratio) }})</div>
+                    </div>
+                    <div class="quality-item">
+                        <div class="label">低置信比例</div>
+                        <div class="value">{{ formatPercent(alignmentReport.confidence && alignmentReport.confidence.low_confidence_ratio) }}</div>
+                    </div>
+                    <div class="quality-item">
+                        <div class="label">可疑边界</div>
+                        <div class="value">{{ (alignmentReport.boundary_quality && alignmentReport.boundary_quality.suspicious_count) || 0 }} ({{ formatPercent(alignmentReport.boundary_quality && alignmentReport.boundary_quality.suspicious_ratio) }})</div>
+                    </div>
+                    <div class="quality-item">
+                        <div class="label">回访违规次数</div>
+                        <div class="value">{{ (alignmentReport.transition_stats && alignmentReport.transition_stats.revisit_violations) || 0 }}</div>
+                    </div>
+                    <div class="quality-item">
+                        <div class="label">策略参数</div>
+                        <div class="value">no_revisit={{ (alignmentReport.coverage_policy && alignmentReport.coverage_policy.enforce_no_revisit) ? 'on' : 'off' }}, min_usage={{ formatPercent(alignmentReport.coverage_policy && alignmentReport.coverage_policy.min_slide_usage_ratio) }}</div>
+                    </div>
+                </div>
             </div>
         </div>
+
+        <div class="footer">Talk2Slides &copy; 2026</div>
     </div>
+</div>
 
-    <script>
-        const { createApp, ref, computed, onMounted } = Vue;
-        const { ElMessage, ElLoading } = ElementPlus;
+<script>
+const { createApp, ref, computed, onMounted } = Vue;
+const { ElMessage } = ElementPlus;
 
-        createApp({
-            setup() {
-                // 文件列表
-                const pptxFiles = ref([]);
-                const mp3Files = ref([]);
-                const srtFiles = ref([]);
+createApp({
+    setup() {
+        const pptxFiles = ref([]);
+        const mp3Files = ref([]);
+        const srtFiles = ref([]);
 
-                // 参数
-                const similarityThreshold = ref(0.5);
-                const minDisplayDuration = ref(2.0);
-                const outputResolution = ref('1920x1080');
-                const srtMergeGapSec = ref(0.6);
-                const srtMinDurationSec = ref(0.8);
-                const alignMaxForwardJump = ref(5);
-                const alignMaxBacktrack = ref(2);
-                const alignSwitchPenalty = ref(0.08);
-                const alignForwardJumpPenalty = ref(0.03);
-                const alignEnforceSequential = ref(false);
-                const advancedParamsOpen = ref([]);
+        const similarityThreshold = ref(0.5);
+        const minDisplayDuration = ref(2.0);
+        const outputResolution = ref('1920x1080');
+        const srtMergeGapSec = ref(0.6);
+        const srtMinDurationSec = ref(0.8);
+        const alignMaxForwardJump = ref(5);
+        const alignMaxBacktrack = ref(2);
+        const alignSwitchPenalty = ref(0.08);
+        const alignForwardJumpPenalty = ref(0.03);
+        const alignSwitchDelayMs = ref(250);
+        const alignEnforceNoRevisit = ref(true);
+        const alignMinSlideUsageRatio = ref(0.70);
+        const alignEnforceSequential = ref(false);
+        const advancedParamsOpen = ref([]);
 
-                // 处理状态
-                const processing = ref(false);
-                const progress = ref(0);
-                const progressText = ref('');
-                const resultVideoUrl = ref('');
-                const resultVideoFilename = ref('generated_video.mp4');
-                const taskId = ref('');
-                const hasShownSuccess = ref(false);
-                let notificationAudio = null;
-                onMounted(() => {
+        const processing = ref(false);
+        const progress = ref(0);
+        const progressText = ref('');
+        const elapsedText = ref('--:--');
+        const etaText = ref('--:--');
+        const resultVideoUrl = ref('');
+        const resultVideoFilename = ref('generated_video.mp4');
+        const alignmentReport = ref(null);
+        const resultVideoEl = ref(null);
+        const timelineOverview = ref([]);
+        const videoDurationSec = ref(0);
+        const currentPlaybackSec = ref(0);
+        const taskId = ref('');
+        const hasShownSuccess = ref(false);
+
+        let notificationAudio = null;
+
+        const filesReady = computed(() => {
+            return pptxFiles.value.length > 0 && mp3Files.value.length > 0 && srtFiles.value.length > 0;
+        });
+
+        const handlePPTXChange = (file) => { pptxFiles.value = [file.raw]; };
+        const handleMP3Change = (file) => { mp3Files.value = [file.raw]; };
+        const handleSRTChange = (file) => { srtFiles.value = [file.raw]; };
+
+        const removeFile = (type, file) => {
+            if (type === 'pptx') pptxFiles.value = pptxFiles.value.filter(f => f !== file);
+            if (type === 'mp3') mp3Files.value = mp3Files.value.filter(f => f !== file);
+            if (type === 'srt') srtFiles.value = srtFiles.value.filter(f => f !== file);
+        };
+
+        const formatFileSize = (bytes) => {
+            if (!bytes || bytes <= 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+        };
+
+        const formatDuration = (seconds) => {
+            if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return '--:--';
+            const total = Math.max(0, Math.round(Number(seconds)));
+            const h = Math.floor(total / 3600);
+            const m = Math.floor((total % 3600) / 60);
+            const s = total % 60;
+            if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+            return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        };
+
+        const formatPercent = (ratio) => {
+            if (ratio === null || ratio === undefined || Number.isNaN(Number(ratio))) return '--';
+            return `${(Number(ratio) * 100).toFixed(1)}%`;
+        };
+
+        const toNumberOr = (value, fallback) => {
+            const num = Number(value);
+            return Number.isFinite(num) ? num : fallback;
+        };
+
+        const toBoolOr = (value, fallback) => {
+            if (typeof value === 'boolean') return value;
+            if (typeof value === 'string') {
+                const normalized = value.trim().toLowerCase();
+                if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) return true;
+                if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) return false;
+            }
+            return fallback;
+        };
+
+        const loadDefaultsFromServer = async () => {
+            try {
+                const { data } = await axios.get('/api/defaults');
+                if (!data || typeof data !== 'object') return;
+
+                similarityThreshold.value = toNumberOr(data.similarity_threshold, similarityThreshold.value);
+                minDisplayDuration.value = toNumberOr(data.min_display_duration, minDisplayDuration.value);
+                outputResolution.value = (typeof data.output_resolution === 'string' && data.output_resolution.trim())
+                    ? data.output_resolution.trim()
+                    : outputResolution.value;
+                srtMergeGapSec.value = toNumberOr(data.srt_merge_gap_sec, srtMergeGapSec.value);
+                srtMinDurationSec.value = toNumberOr(data.srt_min_duration_sec, srtMinDurationSec.value);
+                alignMaxBacktrack.value = toNumberOr(data.align_max_backtrack, alignMaxBacktrack.value);
+                alignMaxForwardJump.value = toNumberOr(data.align_max_forward_jump, alignMaxForwardJump.value);
+                alignSwitchPenalty.value = toNumberOr(data.align_switch_penalty, alignSwitchPenalty.value);
+                alignForwardJumpPenalty.value = toNumberOr(data.align_forward_jump_penalty, alignForwardJumpPenalty.value);
+                alignSwitchDelayMs.value = toNumberOr(data.align_switch_delay_ms, alignSwitchDelayMs.value);
+                alignEnforceNoRevisit.value = toBoolOr(data.align_enforce_no_revisit, alignEnforceNoRevisit.value);
+                alignMinSlideUsageRatio.value = toNumberOr(data.align_min_slide_usage_ratio, alignMinSlideUsageRatio.value);
+                alignEnforceSequential.value = toBoolOr(data.align_enforce_sequential, alignEnforceSequential.value);
+            } catch (err) {
+                console.warn('Failed to load defaults from /api/defaults:', err);
+            }
+        };
+
+        onMounted(async () => {
+            notificationAudio = new Audio('/api/sound');
+            notificationAudio.preload = 'auto';
+            await loadDefaultsFromServer();
+        });
+
+        const normalizeTimelineOverview = (items) => {
+            const normalized = (Array.isArray(items) ? items : [])
+                .map((item, idx) => {
+                    const start = Number(item?.start ?? 0);
+                    const end = Number(item?.end ?? start);
+                    const slideIndexNumber = Number(item?.slide_index);
+                    const slideIndex = Number.isFinite(slideIndexNumber) ? slideIndexNumber : -1;
+                    const rawLabel = String(item?.label || '').trim();
+                    const fallbackLabel = slideIndex >= 0 ? `第${slideIndex + 1}页` : `片段${idx + 1}`;
+                    return {
+                        start: Number.isFinite(start) ? Math.max(0, start) : 0,
+                        end: Number.isFinite(end) ? Math.max(0, end) : 0,
+                        slide_index: slideIndex,
+                        label: rawLabel || fallbackLabel,
+                    };
+                })
+                .filter(item => item.end > item.start)
+                .sort((a, b) => a.start - b.start);
+
+            const merged = [];
+            normalized.forEach(item => {
+                const last = merged.length ? merged[merged.length - 1] : null;
+                if (
+                    last &&
+                    item.slide_index === last.slide_index &&
+                    item.label === last.label &&
+                    item.start <= last.end + 0.05
+                ) {
+                    last.end = Math.max(last.end, item.end);
+                    return;
+                }
+                merged.push({ ...item });
+            });
+            return merged;
+        };
+
+        const buildTimelineOverviewFallback = (timeline) => {
+            const fallback = (Array.isArray(timeline) ? timeline : []).map((item, idx) => {
+                const slideIndexNumber = Number(item?.slide_index);
+                const slideIndex = Number.isFinite(slideIndexNumber) ? slideIndexNumber : -1;
+                return {
+                    start: Number(item?.start ?? 0),
+                    end: Number(item?.end ?? item?.start ?? 0),
+                    slide_index: slideIndex,
+                    label: slideIndex >= 0 ? `第${slideIndex + 1}页` : `片段${idx + 1}`,
+                };
+            });
+            return normalizeTimelineOverview(fallback);
+        };
+
+        const playbackTotalDuration = computed(() => {
+            const timelineEnd = timelineOverview.value.length
+                ? Number(timelineOverview.value[timelineOverview.value.length - 1].end)
+                : 0;
+            return Math.max(Number(videoDurationSec.value) || 0, timelineEnd || 0);
+        });
+
+        const segmentBars = computed(() => {
+            const total = playbackTotalDuration.value;
+            if (total <= 0 || !timelineOverview.value.length) return [];
+            return timelineOverview.value
+                .map((seg, idx) => {
+                    const duration = Math.max(0, Number(seg.end) - Number(seg.start));
+                    return {
+                        ...seg,
+                        widthPct: Math.max(0, (duration / total) * 100),
+                        key: `${idx}-${Number(seg.start).toFixed(3)}-${Number(seg.end).toFixed(3)}-${seg.slide_index}`,
+                    };
+                })
+                .filter(seg => seg.widthPct > 0);
+        });
+
+        const playbackPercent = computed(() => {
+            const total = playbackTotalDuration.value;
+            if (total <= 0) return 0;
+            return Math.min(100, Math.max(0, (Number(currentPlaybackSec.value) / total) * 100));
+        });
+
+        const activeSegmentIndex = computed(() => {
+            const segments = segmentBars.value;
+            if (!segments.length) return -1;
+            const current = Number(currentPlaybackSec.value) || 0;
+            for (let i = 0; i < segments.length; i += 1) {
+                if (current >= Number(segments[i].start) && current < Number(segments[i].end)) {
+                    return i;
+                }
+            }
+            if (current >= Number(segments[segments.length - 1].end)) {
+                return segments.length - 1;
+            }
+            return 0;
+        });
+
+        const onVideoLoadedMetadata = (event) => {
+            const video = event?.target || resultVideoEl.value;
+            const duration = Number(video?.duration || 0);
+            if (Number.isFinite(duration) && duration > 0) videoDurationSec.value = duration;
+            currentPlaybackSec.value = Number(video?.currentTime || 0);
+        };
+
+        const onVideoTimeUpdate = (event) => {
+            const video = event?.target || resultVideoEl.value;
+            currentPlaybackSec.value = Number(video?.currentTime || 0);
+            const duration = Number(video?.duration || 0);
+            if (Number.isFinite(duration) && duration > 0) videoDurationSec.value = duration;
+        };
+
+        const playNotificationSound = () => {
+            try {
+                if (!notificationAudio) {
                     notificationAudio = new Audio('/api/sound');
                     notificationAudio.preload = 'auto';
-                });
+                }
+                notificationAudio.currentTime = 0;
+                notificationAudio.play().catch(() => {});
+            } catch (_) {}
+        };
 
-                // 计算是否准备好
-                const filesReady = computed(() => {
-                    return pptxFiles.value.length > 0 && mp3Files.value.length > 0 && srtFiles.value.length > 0;
-                });
-
-                // 文件处理
-                const handlePPTXChange = (file) => {
-                    pptxFiles.value = [file.raw];
-                };
-                const handleMP3Change = (file) => {
-                    mp3Files.value = [file.raw];
-                };
-                const handleSRTChange = (file) => {
-                    srtFiles.value = [file.raw];
-                };
-                const removeFile = (type, file) => {
-                    if (type === 'pptx') {
-                        pptxFiles.value = pptxFiles.value.filter(f => f !== file);
-                    } else if (type === 'mp3') {
-                        mp3Files.value = mp3Files.value.filter(f => f !== file);
-                    } else if (type === 'srt') {
-                        srtFiles.value = srtFiles.value.filter(f => f !== file);
-                    }
-                };
-                const formatFileSize = (bytes) => {
-                    if (bytes === 0) return '0 B';
-                    const k = 1024;
-                    const sizes = ['B', 'KB', 'MB', 'GB'];
-                    const i = Math.floor(Math.log(bytes) / Math.log(k));
-                    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-                };
-                
-                // 播放提示音效
-                const playNotificationSound = () => {
-                    try {
-                        if (!notificationAudio) {
-                            notificationAudio = new Audio('/api/sound');
-                            notificationAudio.preload = 'auto';
-                        }
-                        notificationAudio.currentTime = 0;
-                        notificationAudio.play().catch((error) => {
-                            console.log('音效播放失败:', error);
-                        });
-                    } catch (error) {
-                        console.log('音效播放失败:', error);
-                        // 静默失败，不影响主要功能
-                    }
-                };
-
-                // 开始处理
-                const startProcessing = async () => {
-                    if (!filesReady.value) {
-                        ElMessage.error('请上传所有必需文件');
-                        return;
-                    }
-
-                    processing.value = true;
-                    progress.value = 0;
-                    progressText.value = '准备上传文件...';
-                    hasShownSuccess.value = false;
-
-                    const formData = new FormData();
-                    formData.append('pptx', pptxFiles.value[0]);
-                    formData.append('mp3', mp3Files.value[0]);
-                    formData.append('srt', srtFiles.value[0]);
-                    formData.append('similarity_threshold', similarityThreshold.value);
-                    formData.append('min_display_duration', minDisplayDuration.value);
-                    formData.append('output_resolution', outputResolution.value);
-                    formData.append('srt_merge_gap_sec', srtMergeGapSec.value);
-                    formData.append('srt_min_duration_sec', srtMinDurationSec.value);
-                    formData.append('align_max_forward_jump', alignMaxForwardJump.value);
-                    formData.append('align_max_backtrack', alignMaxBacktrack.value);
-                    formData.append('align_switch_penalty', alignSwitchPenalty.value);
-                    formData.append('align_forward_jump_penalty', alignForwardJumpPenalty.value);
-                    formData.append('align_enforce_sequential', alignEnforceSequential.value);
-
-                    try {
-                        // 上传文件并启动任务
-                        const uploadResponse = await axios.post('/api/upload', formData, {
-                            headers: { 'Content-Type': 'multipart/form-data' },
-                            onUploadProgress: (progressEvent) => {
-                                const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-                                progress.value = percent * 0.3; // 上传占30%
-                                progressText.value = `上传文件中... ${percent}%`;
-                            }
-                        });
-
-                        taskId.value = uploadResponse.data.task_id;
-                        progress.value = 30;
-                        progressText.value = '文件上传成功，开始处理...';
-
-                        // 轮询任务状态
-                        const pollInterval = setInterval(async () => {
-                            try {
-                                const statusResponse = await axios.get(`/api/task/${taskId.value}/status`);
-                                const status = statusResponse.data;
-                                
-                                progress.value = 30 + Math.floor(status.progress * 0.7); // 处理占70%
-                                progressText.value = status.message;
-
-                                if (status.state === 'completed' && !hasShownSuccess.value) {
-                                    hasShownSuccess.value = true;
-                                    clearInterval(pollInterval);
-                                    progress.value = 100;
-                                    progressText.value = '处理完成！';
-                                    processing.value = false;
-                                    
-                                    // 获取任务预览信息（包含视频URL和文件名）
-                                    const previewResponse = await axios.get(`/api/task/${taskId.value}/preview`);
-                                    resultVideoUrl.value = previewResponse.data.video_url;
-                                    resultVideoFilename.value = previewResponse.data.filename;
-                                    ElMessage.success('视频生成成功！');
-                                    playNotificationSound();
-                                } else if (status.state === 'failed') {
-                                    clearInterval(pollInterval);
-                                    processing.value = false;
-                                    ElMessage.error(`处理失败: ${status.error}`);
-                                }
-                            } catch (error) {
-                                console.error('轮询错误:', error);
-                            }
-                        }, 2000);
-
-                    } catch (error) {
-                        console.error('上传错误:', error);
-                        processing.value = false;
-                        ElMessage.error('上传失败: ' + (error.response?.data?.detail || error.message));
-                    }
-                };
-
-                return {
-                    pptxFiles,
-                    mp3Files,
-                    srtFiles,
-                    similarityThreshold,
-                    minDisplayDuration,
-                    outputResolution,
-                    srtMergeGapSec,
-                    srtMinDurationSec,
-                    alignMaxForwardJump,
-                    alignMaxBacktrack,
-                    alignSwitchPenalty,
-                    alignForwardJumpPenalty,
-                    alignEnforceSequential,
-                    advancedParamsOpen,
-                    processing,
-                    progress,
-                    progressText,
-                    resultVideoUrl,
-                    resultVideoFilename,
-                    filesReady,
-                    handlePPTXChange,
-                    handleMP3Change,
-                    handleSRTChange,
-                    removeFile,
-                    formatFileSize,
-                    startProcessing
-                };
+        const startProcessing = async () => {
+            if (!filesReady.value) {
+                ElMessage.error('请上传全部必需文件');
+                return;
             }
-        }).use(ElementPlus).mount('#app');
-    </script>
+
+            processing.value = true;
+            progress.value = 0;
+            progressText.value = 'Preparing upload...';
+            elapsedText.value = '00:00';
+            etaText.value = '--:--';
+            resultVideoUrl.value = '';
+            resultVideoFilename.value = 'generated_video.mp4';
+            alignmentReport.value = null;
+            timelineOverview.value = [];
+            videoDurationSec.value = 0;
+            currentPlaybackSec.value = 0;
+            hasShownSuccess.value = false;
+
+            const formData = new FormData();
+            formData.append('pptx', pptxFiles.value[0]);
+            formData.append('mp3', mp3Files.value[0]);
+            formData.append('srt', srtFiles.value[0]);
+            formData.append('similarity_threshold', similarityThreshold.value);
+            formData.append('min_display_duration', minDisplayDuration.value);
+            formData.append('output_resolution', outputResolution.value);
+            formData.append('srt_merge_gap_sec', srtMergeGapSec.value);
+            formData.append('srt_min_duration_sec', srtMinDurationSec.value);
+            formData.append('align_max_forward_jump', alignMaxForwardJump.value);
+            formData.append('align_max_backtrack', alignMaxBacktrack.value);
+            formData.append('align_switch_penalty', alignSwitchPenalty.value);
+            formData.append('align_forward_jump_penalty', alignForwardJumpPenalty.value);
+            formData.append('align_switch_delay_ms', alignSwitchDelayMs.value);
+            formData.append('align_enforce_no_revisit', alignEnforceNoRevisit.value);
+            formData.append('align_min_slide_usage_ratio', alignMinSlideUsageRatio.value);
+            formData.append('align_enforce_sequential', alignEnforceSequential.value);
+
+            try {
+                const uploadResponse = await axios.post('/api/upload', formData, {
+                    headers: { 'Content-Type': 'multipart/form-data' },
+                    onUploadProgress: (e) => {
+                        const percent = e.total ? Math.round((e.loaded * 100) / e.total) : 0;
+                        progress.value = percent * 0.3;
+                        progressText.value = `Uploading files... ${percent}%`;
+                    }
+                });
+
+                taskId.value = uploadResponse.data.task_id;
+                progress.value = 30;
+                progressText.value = 'Upload completed. Processing started...';
+
+                const pollInterval = setInterval(async () => {
+                    try {
+                        const { data: status } = await axios.get(`/api/task/${taskId.value}/status`);
+                        progress.value = 30 + Math.floor(status.progress * 0.7);
+                        progressText.value = status.message || 'Processing...';
+                        elapsedText.value = formatDuration(status.elapsed_seconds);
+                        if (status.eta_formatted) etaText.value = status.eta_formatted;
+                        else if (status.state === 'completed') etaText.value = '00:00';
+                        else if (status.state === 'processing') etaText.value = 'calculating...';
+                        else etaText.value = '--:--';
+
+                        if (status.state === 'completed' && !hasShownSuccess.value) {
+                            hasShownSuccess.value = true;
+                            clearInterval(pollInterval);
+                            progress.value = 100;
+                            progressText.value = 'Completed';
+                            processing.value = false;
+
+                            const { data: preview } = await axios.get(`/api/task/${taskId.value}/preview`);
+                            resultVideoUrl.value = preview.video_url;
+                            resultVideoFilename.value = preview.filename;
+                            alignmentReport.value = preview.alignment_report || null;
+                            timelineOverview.value = (Array.isArray(preview.timeline_overview) && preview.timeline_overview.length)
+                                ? normalizeTimelineOverview(preview.timeline_overview)
+                                : buildTimelineOverviewFallback(preview.timeline);
+                            videoDurationSec.value = 0;
+                            currentPlaybackSec.value = 0;
+
+                            ElMessage.success('视频生成成功');
+                            playNotificationSound();
+                        } else if (status.state === 'failed') {
+                            clearInterval(pollInterval);
+                            processing.value = false;
+                            etaText.value = '--:--';
+                            ElMessage.error(`处理失败: ${status.error}`);
+                        }
+                    } catch (err) {
+                        console.error('Polling error:', err);
+                    }
+                }, 1000);
+            } catch (err) {
+                processing.value = false;
+                ElMessage.error('上传失败: ' + (err.response?.data?.detail || err.message));
+            }
+        };
+
+        return {
+            pptxFiles,
+            mp3Files,
+            srtFiles,
+            similarityThreshold,
+            minDisplayDuration,
+            outputResolution,
+            srtMergeGapSec,
+            srtMinDurationSec,
+            alignMaxForwardJump,
+            alignMaxBacktrack,
+            alignSwitchPenalty,
+            alignForwardJumpPenalty,
+            alignSwitchDelayMs,
+            alignEnforceNoRevisit,
+            alignMinSlideUsageRatio,
+            alignEnforceSequential,
+            advancedParamsOpen,
+            processing,
+            progress,
+            progressText,
+            elapsedText,
+            etaText,
+            resultVideoUrl,
+            resultVideoFilename,
+            alignmentReport,
+            resultVideoEl,
+            segmentBars,
+            playbackPercent,
+            activeSegmentIndex,
+            currentPlaybackSec,
+            videoDurationSec,
+            filesReady,
+            handlePPTXChange,
+            handleMP3Change,
+            handleSRTChange,
+            removeFile,
+            formatFileSize,
+            formatDuration,
+            formatPercent,
+            onVideoLoadedMetadata,
+            onVideoTimeUpdate,
+            startProcessing
+        };
+    }
+}).use(ElementPlus).mount('#app');
+</script>
 </body>
 </html>

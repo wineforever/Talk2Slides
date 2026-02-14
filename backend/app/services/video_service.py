@@ -1,563 +1,1068 @@
 import os
+import re
 import subprocess
 import tempfile
 import logging
 import time
+from collections import deque
 from pathlib import Path
-from typing import List, Dict, Any
-import json
-import ffmpeg
+from typing import List, Dict, Any, Callable, Optional, Tuple
 import shutil
+
+import ffmpeg
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+
 class VideoService:
-    """视频合成服务"""
+    """Service for building final video from slide images and alignment timeline."""
+    _cached_h264_encoder: Optional[str] = None
+
+    def _build_bottom_progress_bar_spec(
+        self,
+        width: int,
+        height: int,
+        total_duration_sec: float,
+    ) -> Dict[str, Any]:
+        """Build style and timing spec for an in-video bottom progress bar."""
+        safe_duration = float(max(0.1, total_duration_sec))
+        # Structured bar: 2%-3% of frame height, pinned to bottom edge.
+        bar_height = max(8, int(round(height * 0.024)))
+        if bar_height % 2 != 0:
+            bar_height += 1
+        bar_margin = max(1, int(round(height * 0.002)))
+        bar_y = max(0, height - bar_margin - bar_height)
+        return {
+            "duration_expr": f"{safe_duration:.6f}",
+            "bar_height": int(bar_height),
+            "bar_y": int(bar_y),
+            # Use opaque colors to avoid expensive alpha blending in long videos.
+            "track_color": "0x1A1E22",
+            "progress_color": "0x00C2FF",
+        }
+
+    def _pick_h264_encoder(self) -> str:
+        cached = type(self)._cached_h264_encoder
+        if cached:
+            return cached
+
+        preferred = ["h264_nvenc", "h264_qsv", "h264_amf", "libx264"]
+        detected = "libx264"
+        try:
+            result = subprocess.run(
+                [settings.FFMPEG_PATH, "-hide_banner", "-encoders"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=15,
+            )
+            text = (result.stdout or "") + "\n" + (result.stderr or "")
+            lower_text = text.lower()
+            for encoder in preferred:
+                if encoder == "libx264" or encoder in lower_text:
+                    detected = encoder
+                    break
+        except Exception:
+            detected = "libx264"
+
+        type(self)._cached_h264_encoder = detected
+        logger.info("Selected H.264 encoder: %s", detected)
+        return detected
+
+    def _build_video_encoder_args(self, encoder: str) -> List[str]:
+        enc = str(encoder or "").strip().lower()
+        if enc == "libx264":
+            threads = max(1, min(os.cpu_count() or 4, 4))
+            return [
+                "-c:v",
+                "libx264",
+                "-threads",
+                str(threads),
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "stillimage",
+                "-pix_fmt",
+                "yuv420p",
+            ]
+        # Keep hardware args minimal for broad compatibility.
+        return [
+            "-c:v",
+            enc,
+            "-pix_fmt",
+            "yuv420p",
+        ]
+
+    def _compact_segment_label(self, label: str, fallback: str) -> str:
+        compact = str(label or "").strip()
+        compact = re.sub(r"[\r\n\t]+", " ", compact)
+        compact = re.sub(r"\s+", " ", compact)
+        compact = re.sub(r"[|/]+", " ", compact)
+        compact = re.sub(r"^[\-\*\d一二三四五六七八九十]+[\.、:：\)\]）】\s]*", "", compact)
+        compact = compact.strip(" -_，,。；;：:、")
+        if not compact:
+            compact = fallback
+        chunks = [part.strip() for part in re.split(r"[。！？!?；;，,：:|]", compact) if part.strip()]
+        compact = chunks[0] if chunks else compact
+        has_cjk = bool(re.search(r"[\u4e00-\u9fff]", compact))
+        max_len = 10 if has_cjk else 18
+        if len(compact) > max_len:
+            compact = compact[:max_len].rstrip(" -_，,。；;：:")
+        return compact or fallback
+
+    def _escape_drawtext_text(self, text: str) -> str:
+        safe = str(text or "")
+        safe = safe.replace("\\", "\\\\")
+        safe = safe.replace(":", "\\:")
+        safe = safe.replace("'", "\\'")
+        safe = safe.replace(",", "\\,")
+        safe = safe.replace("%", "\\%")
+        return safe
+
+    def _pick_drawtext_font_option(self) -> str:
+        if os.name == "nt":
+            candidates = [
+                r"C:\Windows\Fonts\msyh.ttc",
+                r"C:\Windows\Fonts\simhei.ttf",
+                r"C:\Windows\Fonts\simsun.ttc",
+                r"C:\Windows\Fonts\arial.ttf",
+            ]
+        else:
+            candidates = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            ]
+
+        for path in candidates:
+            p = Path(path)
+            if not p.exists():
+                continue
+            ffmpeg_path = str(p.resolve()).replace("\\", "/")
+            if len(ffmpeg_path) > 1 and ffmpeg_path[1] == ":":
+                ffmpeg_path = ffmpeg_path[0] + "\\:" + ffmpeg_path[2:]
+            return f"fontfile='{ffmpeg_path}'"
+        return ""
+
+    def _build_progress_segments(
+        self,
+        timeline: List[Dict[str, Any]],
+        timeline_overview: Optional[List[Dict[str, Any]]],
+        total_duration: float,
+    ) -> List[Dict[str, Any]]:
+        total_duration = max(0.1, float(total_duration))
+        source = timeline_overview if timeline_overview else timeline
+        raw_items: List[Dict[str, Any]] = []
+        for idx, item in enumerate(source or []):
+            start = float(item.get("start", 0.0))
+            end = float(item.get("end", start))
+            if end <= start:
+                continue
+            label = str(item.get("label") or f"第{idx + 1}段").strip()
+            raw_items.append({"start": start, "end": end, "label": label})
+
+        raw_items.sort(key=lambda x: x["start"])
+        segments: List[Dict[str, Any]] = []
+        cursor = 0.0
+        fallback_index = 1
+
+        for item in raw_items:
+            start = max(0.0, min(total_duration, float(item["start"])))
+            end = max(0.0, min(total_duration, float(item["end"])))
+            if end <= start:
+                continue
+
+            if start > cursor + 1e-3:
+                segments.append(
+                    {
+                        "start": cursor,
+                        "end": start,
+                        "label": self._compact_segment_label("", f"第{fallback_index}段"),
+                    }
+                )
+                fallback_index += 1
+                cursor = start
+
+            start = max(start, cursor)
+            if end <= start:
+                continue
+            segments.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "label": self._compact_segment_label(item["label"], f"第{fallback_index}段"),
+                }
+            )
+            cursor = end
+            fallback_index += 1
+
+        if cursor < total_duration - 1e-3:
+            segments.append(
+                {
+                    "start": cursor,
+                    "end": total_duration,
+                    "label": self._compact_segment_label("", f"第{fallback_index}段"),
+                }
+            )
+
+        if not segments:
+            segments = [{"start": 0.0, "end": total_duration, "label": "全程"}]
+
+        merged: List[Dict[str, Any]] = []
+        for seg in segments:
+            if merged and seg["label"] == merged[-1]["label"] and seg["start"] <= merged[-1]["end"] + 1e-3:
+                merged[-1]["end"] = max(float(merged[-1]["end"]), float(seg["end"]))
+                continue
+            merged.append(dict(seg))
+
+        max_segments = 10
+        while len(merged) > max_segments:
+            shortest_idx = min(
+                range(len(merged)),
+                key=lambda i: float(merged[i]["end"]) - float(merged[i]["start"]),
+            )
+            if len(merged) <= 1:
+                break
+            if shortest_idx == 0:
+                merged[1]["start"] = merged[0]["start"]
+                merged.pop(0)
+            else:
+                merged[shortest_idx - 1]["end"] = merged[shortest_idx]["end"]
+                merged.pop(shortest_idx)
+
+        return merged
 
     def _ensure_first_frame_is_home_slide(
         self,
         timeline: List[Dict[str, Any]],
-        slide_count: int
+        slide_count: int,
     ) -> List[Dict[str, Any]]:
-        """确保视频第一帧来自PPT首页（slide_index=0）。"""
         if not timeline or slide_count <= 0:
             return timeline
 
         normalized = [dict(segment) for segment in timeline]
         first_idx = int(normalized[0].get("slide_index", 0))
         if first_idx != 0:
-            logger.warning(f"首帧修正: 第一片段幻灯片索引为{first_idx}，已强制改为0")
+            logger.warning("First-frame correction: force first segment to slide 0")
             normalized[0]["slide_index"] = 0
         return normalized
-    
+
+    def _ensure_last_tail_is_last_slide(
+        self,
+        timeline: List[Dict[str, Any]],
+        slide_count: int,
+        tail_seconds: float,
+    ) -> List[Dict[str, Any]]:
+        """Force the last tail_seconds of video to use the final PPT slide."""
+        if not timeline or slide_count <= 0:
+            return timeline
+
+        tail_seconds = float(max(0.0, tail_seconds))
+        if tail_seconds <= 0:
+            return [dict(segment) for segment in timeline]
+
+        normalized = [dict(segment) for segment in timeline]
+        normalized.sort(key=lambda x: float(x.get("start", 0.0)))
+
+        first_start = float(normalized[0].get("start", 0.0))
+        final_end = float(normalized[-1].get("end", first_start))
+        if final_end <= first_start:
+            return normalized
+
+        last_slide_index = int(slide_count - 1)
+        tail_start = max(first_start, final_end - tail_seconds)
+
+        rebuilt: List[Dict[str, Any]] = []
+        for segment in normalized:
+            seg_start = float(segment.get("start", 0.0))
+            seg_end = float(segment.get("end", seg_start))
+            if seg_end <= tail_start:
+                rebuilt.append(dict(segment))
+                continue
+            if seg_start < tail_start:
+                truncated = dict(segment)
+                truncated["start"] = seg_start
+                truncated["end"] = tail_start
+                truncated["duration"] = max(0.0, tail_start - seg_start)
+                if truncated["duration"] > 1e-6:
+                    rebuilt.append(truncated)
+
+        tail_duration = max(0.0, final_end - tail_start)
+        if tail_duration <= 1e-6:
+            normalized[-1]["slide_index"] = last_slide_index
+            normalized[-1]["duration"] = max(
+                0.0,
+                float(normalized[-1].get("end", 0.0)) - float(normalized[-1].get("start", 0.0)),
+            )
+            return normalized
+
+        if rebuilt and int(rebuilt[-1].get("slide_index", -1)) == last_slide_index:
+            prev_end = float(rebuilt[-1].get("end", tail_start))
+            if abs(prev_end - tail_start) < 1e-3:
+                rebuilt[-1]["end"] = final_end
+                rebuilt[-1]["duration"] = max(0.0, final_end - float(rebuilt[-1].get("start", tail_start)))
+            else:
+                rebuilt.append(
+                    {
+                        "start": tail_start,
+                        "end": final_end,
+                        "slide_index": last_slide_index,
+                        "duration": tail_duration,
+                    }
+                )
+        else:
+            rebuilt.append(
+                {
+                    "start": tail_start,
+                    "end": final_end,
+                    "slide_index": last_slide_index,
+                    "duration": tail_duration,
+                }
+            )
+
+        cleaned: List[Dict[str, Any]] = []
+        for segment in rebuilt:
+            seg_start = float(segment.get("start", 0.0))
+            seg_end = float(segment.get("end", seg_start))
+            duration = seg_end - seg_start
+            if duration <= 1e-6:
+                continue
+            item = dict(segment)
+            item["start"] = seg_start
+            item["end"] = seg_end
+            item["duration"] = duration
+            cleaned.append(item)
+
+        if not cleaned:
+            cleaned = [
+                {
+                    "start": first_start,
+                    "end": final_end,
+                    "slide_index": last_slide_index,
+                    "duration": max(0.0, final_end - first_start),
+                }
+            ]
+
+        cleaned[-1]["slide_index"] = last_slide_index
+        cleaned[-1]["duration"] = max(0.0, float(cleaned[-1]["end"]) - float(cleaned[-1]["start"]))
+
+        logger.info(
+            "Last-tail correction applied: tail=%.2fs, last_slide=%d",
+            tail_seconds,
+            last_slide_index,
+        )
+        return cleaned
+
     def _validate_image_files(self, image_paths: List[str]) -> bool:
-        """验证所有图片文件是否存在且可访问
-        
-        Args:
-            image_paths: 图片路径列表
-            
-        Returns:
-            True如果所有文件都存在且可访问，否则False
-        """
         for i, path in enumerate(image_paths):
-            path_obj = Path(path)
-            if not path_obj.exists():
-                logger.error(f"图片文件不存在: {path} (索引: {i})")
+            p = Path(path)
+            if not p.exists() or not p.is_file():
+                logger.error("Image not found or invalid: %s (index=%d)", path, i)
                 return False
-            if not path_obj.is_file():
-                logger.error(f"不是有效的文件: {path} (索引: {i})")
-                return False
-            # 检查文件是否可读
             try:
-                with open(path_obj, 'rb') as f:
+                with open(p, "rb") as f:
                     f.read(1)
-            except Exception as e:
-                logger.error(f"无法读取文件: {path} (索引: {i}), 错误: {e}")
+            except Exception as exc:
+                logger.error("Image unreadable: %s (index=%d), err=%s", path, i, exc)
                 return False
         return True
-    
+
     def _normalize_path_for_ffmpeg(self, path: str) -> str:
-        """为FFmpeg规范化文件路径
-        
-        将Windows反斜杠转换为正斜杠，确保路径格式正确
-        
-        Args:
-            path: 原始文件路径
-            
-        Returns:
-            规范化后的路径
-        """
-        # 使用Path对象解析路径
-        path_obj = Path(path).resolve()
-        # 转换为字符串并用正斜杠替换反斜杠
-        normalized = str(path_obj).replace('\\', '/')
-        logger.debug(f"路径规范化: {path} -> {normalized}")
-        return normalized
-    
+        return str(Path(path).resolve()).replace("\\", "/")
+
+    def _invoke_progress(
+        self,
+        progress_callback: Optional[Callable[[float, str], None]],
+        ratio: float,
+        message: str,
+    ) -> None:
+        if not progress_callback:
+            return
+        ratio = float(max(0.0, min(1.0, ratio)))
+        progress_callback(ratio, message)
+
+    def _parse_ffmpeg_time(self, value: str) -> Optional[float]:
+        try:
+            parts = value.strip().split(":")
+            if len(parts) != 3:
+                return None
+            h = float(parts[0])
+            m = float(parts[1])
+            s = float(parts[2])
+            return h * 3600.0 + m * 60.0 + s
+        except Exception:
+            return None
+
+    def _run_ffmpeg_with_progress(
+        self,
+        cmd: List[str],
+        total_duration_sec: float,
+        stage_message: str,
+        progress_callback: Optional[Callable[[float, str], None]],
+        progress_range: Tuple[float, float],
+    ) -> None:
+        start_ratio, end_ratio = progress_range
+        start_ratio = float(max(0.0, min(1.0, start_ratio)))
+        end_ratio = float(max(start_ratio, min(1.0, end_ratio)))
+
+        logger.info("Running ffmpeg command: %s", " ".join(cmd))
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            # Merge stderr into stdout so ffmpeg logs are consumed continuously.
+            # This avoids pipe-buffer deadlocks when stderr is verbose.
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            bufsize=1,
+        )
+
+        def map_ratio(local_ratio: float) -> float:
+            local_ratio = float(max(0.0, min(1.0, local_ratio)))
+            return start_ratio + (end_ratio - start_ratio) * local_ratio
+
+        last_reported = -1.0
+        total_duration_sec = float(max(0.0, total_duration_sec))
+        combined_output: deque[str] = deque(maxlen=400)
+
+        try:
+            if process.stdout is not None:
+                for raw_line in process.stdout:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    combined_output.append(line)
+
+                    local_ratio = None
+                    if line.startswith("out_time_ms="):
+                        # ffmpeg key name is out_time_ms but value unit is microseconds.
+                        raw_val = line.split("=", 1)[1].strip()
+                        if raw_val:
+                            try:
+                                out_time_sec = float(raw_val) / 1_000_000.0
+                                if total_duration_sec > 0:
+                                    local_ratio = out_time_sec / total_duration_sec
+                            except Exception:
+                                pass
+                    elif line.startswith("out_time="):
+                        raw_val = line.split("=", 1)[1].strip()
+                        out_time_sec = self._parse_ffmpeg_time(raw_val)
+                        if out_time_sec is not None and total_duration_sec > 0:
+                            local_ratio = out_time_sec / total_duration_sec
+                    elif line == "progress=end":
+                        local_ratio = 1.0
+
+                    if local_ratio is None:
+                        continue
+
+                    mapped = map_ratio(local_ratio)
+                    if mapped - last_reported >= 0.003 or local_ratio >= 1.0:
+                        last_reported = mapped
+                        self._invoke_progress(
+                            progress_callback,
+                            mapped,
+                            f"{stage_message} {max(0.0, min(100.0, local_ratio * 100.0)):.1f}%",
+                        )
+
+            return_code = process.wait()
+            if return_code != 0:
+                ffmpeg_tail = "\n".join(combined_output).strip()
+                if ffmpeg_tail:
+                    raise RuntimeError(f"ffmpeg exited with code {return_code}\n{ffmpeg_tail}")
+                raise RuntimeError(f"ffmpeg exited with code {return_code}")
+        finally:
+            try:
+                if process.stdout:
+                    process.stdout.close()
+            except Exception:
+                pass
+            try:
+                if process.stderr:
+                    process.stderr.close()
+            except Exception:
+                pass
+
+        self._invoke_progress(progress_callback, end_ratio, f"{stage_message} 100.0%")
+
     def create_video_from_timeline(
         self,
         image_paths: List[str],
         timeline: List[Dict[str, Any]],
         audio_path: str,
         output_path: str,
+        timeline_overview: Optional[List[Dict[str, Any]]] = None,
         resolution: str = "1920x1080",
-        fps: int = 30
+        fps: int = 30,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
     ) -> str:
-        """根据时间轴创建视频
-        
-        Args:
-            image_paths: 图片路径列表，按幻灯片顺序排列
-            timeline: 时间轴映射列表，每个元素包含start, end, slide_index
-            audio_path: 音频文件路径
-            output_path: 输出视频路径
-            resolution: 视频分辨率，格式为"宽x高"
-            fps: 视频帧率
-            
-        Returns:
-            输出视频路径
-        """
-        # 验证输入参数
         if not image_paths:
-            raise ValueError("图片路径列表不能为空")
+            raise ValueError("image_paths must not be empty")
         if not timeline:
-            # 分析时间轴为空的原因，提供详细错误信息
-            error_msg = "时间轴为空，可能原因：\n"
-            error_msg += f"- 语义对齐失败，{len(image_paths)}个图片可用\n"
-            error_msg += "- 请检查以下可能原因：\n"
-            error_msg += "  1. PPT和字幕内容不相关（语义相似度过低）\n"
-            error_msg += "  2. 相似度阈值设置过高（默认0.5）\n"
-            error_msg += "  3. 最小展示时长设置过长（默认2.0秒）\n"
-            error_msg += "  4. PPT或SRT文件解析失败\n"
-            error_msg += "\n建议解决方案：\n"
-            error_msg += "1. 降低similarity_threshold参数（如0.3）\n"
-            error_msg += "2. 降低min_display_duration参数（如1.0）\n"
-            error_msg += "3. 检查PPT和SRT文件内容是否相关\n"
-            error_msg += "4. 查看服务器日志获取详细诊断信息\n"
-            raise ValueError(error_msg)
+            raise ValueError("timeline must not be empty")
+
+        self._invoke_progress(progress_callback, 0.01, "Validating timeline and files...")
 
         if settings.VIDEO_FORCE_FIRST_SLIDE_FRAME:
-            timeline = self._ensure_first_frame_is_home_slide(
-                timeline=timeline,
-                slide_count=len(image_paths)
-            )
-        
-        # 验证图片文件是否存在且可访问
-        logger.info(f"开始验证{len(image_paths)}个图片文件")
+            timeline = self._ensure_first_frame_is_home_slide(timeline=timeline, slide_count=len(image_paths))
+
+        tail_sec = float(max(0.1, getattr(settings, "VIDEO_FORCE_LAST_SLIDE_TAIL_SEC", 5.0)))
+        timeline = self._ensure_last_tail_is_last_slide(
+            timeline=timeline,
+            slide_count=len(image_paths),
+            tail_seconds=tail_sec,
+        )
+
         if not self._validate_image_files(image_paths):
-            raise Exception("部分图片文件不存在或无法访问，请检查PPT处理结果")
-        logger.info("所有图片文件验证通过")
-        
-        # 记录输出路径信息用于调试
+            raise FileNotFoundError("Some slide images are missing or unreadable")
+
         output_path_obj = Path(output_path)
-        logger.info(f"视频生成参数: 输出路径={output_path_obj.resolve()}, "
-                   f"分辨率={resolution}, 帧率={fps}fps, "
-                   f"时间轴片段数={len(timeline)}, 图片数={len(image_paths)}")
-        
+        output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+
+        width, height = map(int, resolution.split("x"))
+
+        temp_dir: Optional[Path] = None
         try:
-            width, height = map(int, resolution.split('x'))
-            logger.info(f"视频分辨率: {width}x{height}, 帧率: {fps}fps")
-            
-            # 1. 准备临时目录 - 使用不含中文字符的路径
-            # 优先使用项目临时目录，避免用户目录中的中文字符
             base_temp_dir = Path(settings.BASE_DIR) / "temp" / "video_processing"
             base_temp_dir.mkdir(parents=True, exist_ok=True)
             temp_dir = Path(tempfile.mkdtemp(dir=base_temp_dir, prefix=f"video_{int(time.time())}_"))
-            logger.info(f"创建临时目录: {temp_dir}")
-            
-            # 2. 生成FFmpeg concat文件
+
+            self._invoke_progress(progress_callback, 0.08, "Preparing concat list...")
             concat_file = temp_dir / "concat.txt"
-            logger.info(f"生成concat文件: {concat_file}")
-            self._create_concat_file(concat_file, image_paths, timeline, fps)
-            
-            # 记录concat文件内容用于调试
-            if concat_file.exists():
-                with open(concat_file, 'r', encoding='utf-8') as f:
-                    concat_content = f.read()
-                    logger.debug(f"concat.txt内容:\n{concat_content}")
-            
-            # 3. 创建无声视频（图片序列）
+            _, timeline_total_duration = self._create_concat_file(concat_file, image_paths, timeline, fps)
+
+            target_duration = max(0.1, timeline_total_duration)
+            audio_duration = 0.0
+            if audio_path:
+                try:
+                    audio_duration = float(self.extract_audio_info(audio_path).get("duration", 0.0))
+                except Exception:
+                    audio_duration = 0.0
+
+            if audio_duration > 0 and target_duration > 0:
+                target_duration = min(audio_duration, target_duration)
+
+            self._invoke_progress(progress_callback, 0.20, "Starting slide stitching...")
             temp_video = temp_dir / "temp_video.mp4"
-            logger.info(f"创建无声视频: {temp_video}")
             self._create_silent_video(
                 concat_file=concat_file,
                 output_path=str(temp_video),
                 width=width,
                 height=height,
-                fps=fps
+                fps=fps,
+                expected_duration=max(0.1, timeline_total_duration),
+                progress_callback=progress_callback,
+                progress_range=(0.20, 0.70),
             )
-            
-            # 验证视频文件是否创建成功
-            temp_video_path = Path(temp_video)
-            if not temp_video_path.exists():
-                raise Exception(f"无声视频文件未生成: {temp_video}")
-            
-            video_size = temp_video_path.stat().st_size
-            logger.info(f"无声视频创建成功，文件大小: {video_size}字节，路径: {temp_video_path.resolve()}")
-            
-            # 验证文件大小至少为1KB（视频文件不应该太小）
-            MIN_VIDEO_SIZE = 1024  # 1KB
-            if video_size < MIN_VIDEO_SIZE:
-                logger.warning(f"无声视频文件可能无效: 大小只有{video_size}字节，小于最小要求{MIN_VIDEO_SIZE}字节")
-                # 不直接失败，可能短视频确实很小，但记录警告
-            
-            # 4. 合并音频
-            logger.info(f"合并音频: {audio_path}")
-            self._merge_audio_video(
-                video_path=str(temp_video),
-                audio_path=audio_path,
-                output_path=output_path
+
+            if not temp_video.exists() or temp_video.stat().st_size <= 0:
+                raise RuntimeError("Silent video generation failed")
+
+            self._invoke_progress(progress_callback, 0.70, "Generating progress bar track...")
+            bar_spec = self._build_bottom_progress_bar_spec(width=width, height=height, total_duration_sec=target_duration)
+            progress_segments = self._build_progress_segments(
+                timeline=timeline,
+                timeline_overview=timeline_overview,
+                total_duration=target_duration,
             )
-            
-            # 验证最终输出文件
-            output_path_obj = Path(output_path)
-            output_dir = output_path_obj.parent
-            
-            # 记录输出路径详细信息
-            logger.info(f"输出文件检查: 路径={output_path_obj.resolve()}, 目录={output_dir.resolve()}")
-            
-            # 验证输出目录权限（在_merge_audio_video中已有验证，但这里再检查一次）
-            if not output_dir.exists():
-                output_dir.mkdir(parents=True, exist_ok=True)
-                logger.info(f"创建输出目录: {output_dir}")
-            
-            if not os.access(str(output_dir), os.W_OK):
-                raise PermissionError(f"输出目录不可写: {output_dir}")
-            
-            # 验证文件是否存在
-            if not output_path_obj.exists():
-                raise Exception(f"最终视频文件未生成: {output_path_obj.resolve()}")
-            
-            final_size = output_path_obj.stat().st_size
-            logger.info(f"最终视频创建成功，文件大小: {final_size}字节，路径: {output_path_obj.resolve()}")
-            
-            # 验证文件大小至少为1KB
-            MIN_FINAL_VIDEO_SIZE = 1024  # 1KB
-            if final_size < MIN_FINAL_VIDEO_SIZE:
-                logger.warning(f"最终视频文件可能无效: 大小只有{final_size}字节，小于最小要求{MIN_FINAL_VIDEO_SIZE}字节")
-                # 不直接失败，但记录严重警告
-                logger.error(f"警告: 生成的视频文件异常小，可能FFmpeg处理失败或输入数据有问题")
-            
-            # 5. 清理临时文件（可选，保留用于调试）
-            # shutil.rmtree(temp_dir, ignore_errors=True)
-            # logger.info(f"清理临时目录: {temp_dir}")
-            
-            return output_path
-            
-        except Exception as e:
-            logger.error(f"视频合成失败: {str(e)}", exc_info=True)
-            # 在异常中包含更多上下文信息
-            raise Exception(f"视频合成失败: {str(e)}\n临时目录: {temp_dir if 'temp_dir' in locals() else '未创建'}")
-    
+            bar_video = temp_dir / "progress_bar.mp4"
+            self._create_progress_bar_video(
+                output_path=str(bar_video),
+                width=width,
+                bar_height=int(bar_spec["bar_height"]),
+                fps=fps,
+                duration=max(0.1, target_duration),
+                track_color=str(bar_spec["track_color"]),
+                progress_color=str(bar_spec["progress_color"]),
+                segments=progress_segments,
+                progress_callback=progress_callback,
+                progress_range=(0.70, 0.78),
+            )
+
+            self._invoke_progress(progress_callback, 0.78, "Compositing final video...")
+            self._compose_final_video_with_progress(
+                base_video_path=str(temp_video),
+                progress_video_path=str(bar_video),
+                audio_path=audio_path if audio_path else None,
+                output_path=output_path,
+                progress_y=int(bar_spec["bar_y"]),
+                expected_duration=max(0.1, target_duration),
+                progress_callback=progress_callback,
+                progress_range=(0.78, 0.97),
+            )
+
+            if not output_path_obj.exists() or output_path_obj.stat().st_size <= 0:
+                raise RuntimeError("Final output file was not generated")
+
+            self._invoke_progress(progress_callback, 1.0, "Video generation completed")
+            return str(output_path_obj)
+
+        except Exception as exc:
+            logger.error("Video synthesis failed: %s", exc, exc_info=True)
+            raise Exception(f"Video synthesis failed: {exc}")
+        finally:
+            if temp_dir and temp_dir.exists():
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
     def _create_concat_file(
         self,
         concat_file: Path,
         image_paths: List[str],
         timeline: List[Dict[str, Any]],
-        fps: int
-    ):
-        """创建FFmpeg concat文件
-        
-        格式:
-        file 'slide_001.png'
-        duration 5.0
-        file 'slide_001.png'
-        duration 3.0
-        ...
-        """
-        lines = []
-        logger.info(f"创建concat文件，包含{len(timeline)}个时间片段，{len(image_paths)}个图片文件")
-        
-        # 时间轴统计信息
+        fps: int,
+    ) -> Tuple[str, float]:
+        lines: List[str] = []
         total_duration = 0.0
-        valid_segments = 0
-        invalid_segments = []
-        
-        for i, segment in enumerate(timeline):
-            slide_idx = segment["slide_index"]
-            start_time = segment["start"]
-            end_time = segment["end"]
+
+        for idx, segment in enumerate(timeline):
+            slide_idx = int(segment.get("slide_index", -1))
+            start_time = float(segment.get("start", 0.0))
+            end_time = float(segment.get("end", start_time))
             duration = end_time - start_time
-            
-            # 验证时间片段有效性
+
             if duration <= 0:
-                error_msg = f"时间片段{i}时长无效或为负数: start={start_time}, end={end_time}, duration={duration}"
-                logger.error(error_msg)
-                invalid_segments.append({"index": i, "start": start_time, "end": end_time, "duration": duration, "slide_idx": slide_idx})
-                raise ValueError(error_msg)
-            
-            if end_time <= start_time:
-                error_msg = f"时间片段{i}结束时间不大于开始时间: start={start_time}, end={end_time}"
-                logger.error(error_msg)
-                invalid_segments.append({"index": i, "start": start_time, "end": end_time, "duration": duration, "slide_idx": slide_idx})
-                raise ValueError(error_msg)
-            
-            total_duration += duration
-            valid_segments += 1
-            
+                raise ValueError(
+                    f"Invalid timeline segment at index {idx}: start={start_time}, end={end_time}, duration={duration}"
+                )
             if slide_idx < 0 or slide_idx >= len(image_paths):
-                raise ValueError(f"无效的幻灯片索引: {slide_idx}，有效范围: 0-{len(image_paths)-1}")
-            
+                raise ValueError(f"Invalid slide index {slide_idx}, expected [0, {len(image_paths) - 1}]")
+
             image_path = image_paths[slide_idx]
-            
-            # 验证图片文件是否存在
             if not Path(image_path).exists():
-                raise FileNotFoundError(f"图片文件不存在: {image_path} (片段 {i}, 幻灯片索引 {slide_idx})")
-            
-            # 使用规范化路径（正斜杠，避免编码问题）
+                raise FileNotFoundError(f"Image not found: {image_path} (segment={idx}, slide={slide_idx})")
+
             normalized_path = self._normalize_path_for_ffmpeg(image_path)
-            
-            # 添加文件行
             lines.append(f"file '{normalized_path}'")
-            # 添加时长行
             lines.append(f"duration {duration}")
-            logger.debug(f"片段 {i}: 幻灯片 {slide_idx}, 时长 {duration:.2f}秒, 文件: {normalized_path}")
-        
-        # 记录时间轴统计信息
-        avg_duration = total_duration / max(1, valid_segments)
-        logger.info(f"时间轴统计: 有效片段={valid_segments}/{len(timeline)}, 总时长={total_duration:.2f}秒, 平均时长={avg_duration:.2f}秒")
-        
-        if invalid_segments:
-            logger.warning(f"发现{len(invalid_segments)}个无效时间片段: {invalid_segments}")
-        
-        # 最后需要再添加一次文件（FFmpeg concat的要求）
+            total_duration += duration
+
         if timeline:
-            last_slide_idx = timeline[-1]["slide_index"]
+            last_slide_idx = int(timeline[-1]["slide_index"])
             last_image_path = image_paths[last_slide_idx]
             normalized_last_path = self._normalize_path_for_ffmpeg(last_image_path)
             lines.append(f"file '{normalized_last_path}'")
-            logger.debug(f"最后一行（FFmpeg要求）: 文件: {normalized_last_path}")
-        
-        # 写入文件
-        content = '\n'.join(lines)
-        with open(concat_file, 'w', encoding='utf-8') as f:
+
+        content = "\n".join(lines)
+        with open(concat_file, "w", encoding="utf-8") as f:
             f.write(content)
-        
-        logger.info(f"concat文件创建成功: {concat_file}, 共{len(lines)}行")
-        return content
-    
+
+        logger.info(
+            "Concat file created: %s (segments=%d, total_duration=%.2fs)",
+            concat_file,
+            len(timeline),
+            total_duration,
+        )
+        return content, total_duration
+
     def _create_silent_video(
         self,
         concat_file: Path,
         output_path: str,
         width: int,
         height: int,
-        fps: int
-    ):
-        """使用FFmpeg创建无声视频"""
-        logger.info(f"开始创建无声视频，concat文件: {concat_file}, 输出: {output_path}")
-        
-        # 验证concat文件是否存在
+        fps: int,
+        expected_duration: float,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        progress_range: Tuple[float, float] = (0.0, 1.0),
+    ) -> None:
         if not concat_file.exists():
-            raise FileNotFoundError(f"concat文件不存在: {concat_file}")
-        
-        # 读取并记录concat文件内容
-        try:
-            with open(concat_file, 'r', encoding='utf-8') as f:
-                concat_content = f.read()
-                logger.debug(f"使用的concat文件内容:\n{concat_content}")
-        except Exception as e:
-            logger.warning(f"无法读取concat文件内容: {e}")
-        
-        try:
-            # 记录FFmpeg命令详情
-            logger.info(f"FFmpeg参数: 分辨率{width}x{height}, 帧率{fps}fps, 输入文件: {concat_file}")
-            
-            # 使用ffmpeg-python
-            (
-                ffmpeg
-                .input(str(concat_file), format='concat', safe=0)
-                .filter('scale', width, height, force_original_aspect_ratio='decrease')
-                .filter('pad', width, height, '(ow-iw)/2', '(oh-ih)/2')
-                .output(output_path, r=fps, vcodec='libx264', pix_fmt='yuv420p')
-                .overwrite_output()
-                .run(quiet=True, capture_stdout=True, capture_stderr=True)
+            raise FileNotFoundError(f"Concat file not found: {concat_file}")
+
+        vf = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+            f"fps={int(fps)},format=yuv420p"
+        )
+        cpu_encoder_args = self._build_video_encoder_args("libx264")
+
+        cmd = [
+            settings.FFMPEG_PATH,
+            "-y",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-vf",
+            vf,
+            *cpu_encoder_args,
+            output_path,
+        ]
+
+        self._run_ffmpeg_with_progress(
+            cmd=cmd,
+            total_duration_sec=expected_duration,
+            stage_message="Stitching slides",
+            progress_callback=progress_callback,
+            progress_range=progress_range,
+        )
+
+    def _create_progress_bar_video(
+        self,
+        output_path: str,
+        width: int,
+        bar_height: int,
+        fps: int,
+        duration: float,
+        track_color: str,
+        progress_color: str,
+        segments: List[Dict[str, Any]],
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        progress_range: Tuple[float, float] = (0.0, 1.0),
+    ) -> None:
+        duration = max(0.1, float(duration))
+        bar_height = max(2, int(bar_height))
+        if bar_height % 2 != 0:
+            bar_height += 1
+        width = max(2, int(width))
+        safe_segments = segments or [{"start": 0.0, "end": duration, "label": "全程"}]
+
+        progress_expr = f"max(-{width}\\,min(0\\,-{width}+{width}*t/{duration:.6f}))"
+        filters: List[str] = [
+            f"[0:v]setpts=PTS-STARTPTS,format=yuv420p[track]",
+            f"[1:v]setpts=PTS-STARTPTS,format=yuv420p[fill]",
+            f"[track][fill]overlay=x='{progress_expr}':y=0:shortest=1:repeatlast=0:format=yuv420[bar0]",
+        ]
+
+        current_stage = "bar0"
+        separator_color = "0x6A7785"
+        active_overlay_color = "0xFFFFFF@0.10"
+        text_base_color = "0xD8DEE7"
+        text_active_color = "0xFFFFFF"
+        font_size = max(10, int(round(bar_height * 0.52)))
+        min_text_width = max(64, int(round(width * 0.08)))
+        font_option = self._pick_drawtext_font_option()
+        font_prefix = (font_option + ":") if font_option else ""
+
+        geom_segments: List[Dict[str, Any]] = []
+        for idx, seg in enumerate(safe_segments):
+            start = max(0.0, min(duration, float(seg.get("start", 0.0))))
+            end = max(0.0, min(duration, float(seg.get("end", start))))
+            if end <= start:
+                continue
+            x0 = int(round(width * (start / duration)))
+            x1 = int(round(width * (end / duration)))
+            x0 = max(0, min(width - 1, x0))
+            x1 = max(x0 + 1, min(width, x1))
+            geom_segments.append(
+                {
+                    "index": idx,
+                    "start": start,
+                    "end": end,
+                    "x": x0,
+                    "w": max(1, x1 - x0),
+                    "label": str(seg.get("label") or ""),
+                }
             )
-            logger.info(f"无声视频创建成功: {output_path}")
-            
-        except ffmpeg.Error as e:
-            error_message = e.stderr.decode('utf-8') if e.stderr else str(e)
-            logger.error(f"FFmpeg错误详情:\n{error_message}")
-            
-            # 提供更详细的错误分析和建议
-            error_analysis = self._analyze_ffmpeg_error(error_message, concat_file)
-            raise Exception(f"FFmpeg错误:\n{error_message}\n\n分析建议:\n{error_analysis}")
-    
+
+        for seg in geom_segments:
+            stage_name = f"bar_active_{seg['index']}"
+            filters.append(
+                f"[{current_stage}]drawbox=x={int(seg['x'])}:y=0:w={int(seg['w'])}:h={bar_height}:"
+                f"color={active_overlay_color}:t=fill:enable='between(t,{float(seg['start']):.3f},{float(seg['end']):.3f})'"
+                f"[{stage_name}]"
+            )
+            current_stage = stage_name
+
+        for seg in geom_segments[:-1]:
+            boundary_x = max(0, min(width - 1, int(seg["x"] + seg["w"] - 1)))
+            stage_name = f"bar_sep_{seg['index']}"
+            filters.append(
+                f"[{current_stage}]drawbox=x={boundary_x}:y=0:w=1:h={bar_height}:color={separator_color}:t=fill[{stage_name}]"
+            )
+            current_stage = stage_name
+
+        for seg in geom_segments:
+            if int(seg["w"]) < min_text_width:
+                continue
+            label = self._compact_segment_label(str(seg["label"]), f"第{int(seg['index']) + 1}段")
+            safe_label = self._escape_drawtext_text(label)
+            start_t = float(seg["start"])
+            end_t = float(seg["end"])
+            fade = min(0.3, max(0.08, (end_t - start_t) * 0.25))
+            rise_end = min(end_t, start_t + fade)
+            fall_start = max(start_t, end_t - fade)
+            alpha_expr = (
+                f"if(lt(t\\,{start_t:.3f})\\,0\\,"
+                f"if(lt(t\\,{rise_end:.3f})\\,(t-{start_t:.3f})/{max(0.001, rise_end - start_t):.3f}\\,"
+                f"if(lt(t\\,{fall_start:.3f})\\,1\\,"
+                f"if(lt(t\\,{end_t:.3f})\\,({end_t:.3f}-t)/{max(0.001, end_t - fall_start):.3f}\\,0))))"
+            )
+            common = (
+                f"{font_prefix}text='{safe_label}':fontsize={font_size}:"
+                f"x={int(seg['x'])}+({int(seg['w'])}-text_w)/2:y=(h-text_h)/2"
+            )
+            base_stage = f"bar_txtb_{seg['index']}"
+            filters.append(
+                f"[{current_stage}]drawtext={common}:fontcolor={text_base_color}[{base_stage}]"
+            )
+            active_stage = f"bar_txta_{seg['index']}"
+            filters.append(
+                f"[{base_stage}]drawtext={common}:fontcolor={text_active_color}:alpha='{alpha_expr}'[{active_stage}]"
+            )
+            current_stage = active_stage
+
+        filters.append(f"[{current_stage}]copy[vout]")
+        filter_complex = ";".join(filters)
+
+        cmd = [
+            settings.FFMPEG_PATH,
+            "-y",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c={track_color}:s={width}x{bar_height}:r={int(fps)}:d={duration:.6f}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c={progress_color}:s={width}x{bar_height}:r={int(fps)}:d={duration:.6f}",
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[vout]",
+            *self._build_video_encoder_args("libx264"),
+            output_path,
+        ]
+
+        self._run_ffmpeg_with_progress(
+            cmd=cmd,
+            total_duration_sec=duration,
+            stage_message="Rendering progress bar",
+            progress_callback=progress_callback,
+            progress_range=progress_range,
+        )
+
+    def _compose_final_video_with_progress(
+        self,
+        base_video_path: str,
+        progress_video_path: str,
+        audio_path: Optional[str],
+        output_path: str,
+        progress_y: int,
+        expected_duration: float,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        progress_range: Tuple[float, float] = (0.0, 1.0),
+    ) -> None:
+        if not Path(base_video_path).exists():
+            raise FileNotFoundError(f"Base video file not found: {base_video_path}")
+        if not Path(progress_video_path).exists():
+            raise FileNotFoundError(f"Progress bar video not found: {progress_video_path}")
+        if audio_path and not Path(audio_path).exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        output_dir = Path(output_path).parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if not os.access(str(output_dir), os.W_OK):
+            raise PermissionError(f"Output directory is not writable: {output_dir}")
+
+        filter_complex = (
+            "[0:v]setpts=PTS-STARTPTS,format=yuv420p[base];"
+            "[1:v]setpts=PTS-STARTPTS,format=yuv420p[bar];"
+            f"[base][bar]overlay=x=0:y={int(progress_y)}:shortest=1:format=yuv420[vout]"
+        )
+
+        encoder = self._pick_h264_encoder()
+
+        def build_cmd(video_encoder: str) -> List[str]:
+            cmd = [
+                settings.FFMPEG_PATH,
+                "-y",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+                "-i",
+                base_video_path,
+                "-i",
+                progress_video_path,
+            ]
+            if audio_path:
+                cmd.extend(["-i", audio_path])
+            cmd.extend(
+                [
+                    "-filter_complex",
+                    filter_complex,
+                    "-map",
+                    "[vout]",
+                ]
+            )
+            if audio_path:
+                cmd.extend(["-map", "2:a:0", "-c:a", "aac"])
+            cmd.extend(self._build_video_encoder_args(video_encoder))
+            if audio_path:
+                cmd.append("-shortest")
+            cmd.append(output_path)
+            return cmd
+
+        try:
+            self._run_ffmpeg_with_progress(
+                cmd=build_cmd(encoder),
+                total_duration_sec=max(0.1, expected_duration),
+                stage_message="Compositing final video",
+                progress_callback=progress_callback,
+                progress_range=progress_range,
+            )
+        except Exception as exc:
+            if encoder == "libx264":
+                raise
+            logger.warning("Hardware encoder %s failed (%s), falling back to libx264", encoder, exc)
+            type(self)._cached_h264_encoder = "libx264"
+            self._run_ffmpeg_with_progress(
+                cmd=build_cmd("libx264"),
+                total_duration_sec=max(0.1, expected_duration),
+                stage_message="Compositing final video (CPU fallback)",
+                progress_callback=progress_callback,
+                progress_range=progress_range,
+            )
+
     def _analyze_ffmpeg_error(self, error_message: str, concat_file: Path) -> str:
-        """分析FFmpeg错误并提供建议
-        
-        Args:
-            error_message: FFmpeg错误信息
-            concat_file: concat文件路径
-            
-        Returns:
-            分析建议字符串
-        """
         analysis = []
-        
-        # 检查常见错误模式
         if "Invalid data found when processing input" in error_message:
-            analysis.append("1. concat文件格式可能不正确")
-            analysis.append("2. 图片文件路径可能包含特殊字符或编码问题")
-            analysis.append("3. 图片文件可能损坏或格式不支持")
-            
-            # 检查concat文件
+            analysis.append("1. concat format or image files may be invalid")
+            analysis.append("2. image path may contain unsupported characters")
+            analysis.append("3. image file may be corrupted")
             if concat_file.exists():
-                try:
-                    with open(concat_file, 'r', encoding='utf-8') as f:
-                        lines = f.readlines()
-                        analysis.append(f"4. concat文件共{len(lines)}行，首行: {lines[0][:50] if lines else '空文件'}")
-                except:
-                    analysis.append("4. 无法读取concat文件内容")
-        
+                analysis.append("4. verify concat file content and referenced file paths")
         elif "No such file or directory" in error_message:
-            analysis.append("1. 图片文件不存在或路径错误")
-            analysis.append("2. 请检查concat文件中的文件路径是否正确")
-            
+            analysis.append("1. input file path does not exist")
+            analysis.append("2. validate all file paths in concat and ffmpeg command")
         elif "Permission denied" in error_message:
-            analysis.append("1. 文件权限问题")
-            analysis.append("2. 请检查输出目录是否可写")
-            
+            analysis.append("1. permission issue on input/output paths")
         else:
-            analysis.append("1. 未知FFmpeg错误")
-            analysis.append("2. 请检查FFmpeg安装和版本")
-            analysis.append(f"3. 错误关键词: {error_message[:100]}...")
-        
-        # 通用建议
-        analysis.append("\n通用解决步骤:")
-        analysis.append("1. 确保所有图片文件存在且可读")
-        analysis.append("2. 检查文件路径是否包含中文字符或特殊符号")
-        analysis.append("3. 尝试使用英文路径和文件名")
-        analysis.append("4. 验证FFmpeg安装: ffmpeg -version")
-        analysis.append("5. 检查临时目录权限")
-        
-        return '\n'.join(analysis)
-    
+            analysis.append("1. unknown ffmpeg error")
+            analysis.append("2. check ffmpeg installation and codec support")
+
+        analysis.append("\nGeneral checks:")
+        analysis.append("1. ffmpeg -version")
+        analysis.append("2. verify output directory is writable")
+        return "\n".join(analysis)
+
     def _merge_audio_video(
         self,
         video_path: str,
         audio_path: str,
-        output_path: str
-    ):
-        """合并视频和音频"""
-        logger.info(f"开始合并音视频，视频: {video_path}, 音频: {audio_path}, 输出: {output_path}")
-        
-        # 验证输入文件是否存在
+        output_path: str,
+        expected_duration: float,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        progress_range: Tuple[float, float] = (0.0, 1.0),
+    ) -> None:
         if not Path(video_path).exists():
-            raise FileNotFoundError(f"视频文件不存在: {video_path}")
+            raise FileNotFoundError(f"Video file not found: {video_path}")
         if not Path(audio_path).exists():
-            raise FileNotFoundError(f"音频文件不存在: {audio_path}")
-        
-        # 验证输出目录可写
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
         output_dir = Path(output_path).parent
         output_dir.mkdir(parents=True, exist_ok=True)
         if not os.access(str(output_dir), os.W_OK):
-            raise PermissionError(f"输出目录不可写: {output_dir}")
-        
-        try:
-            # 使用ffmpeg-python合并音频
-            video = ffmpeg.input(video_path)
-            audio = ffmpeg.input(audio_path)
-            
-            logger.info(f"FFmpeg合并命令: 视频编码copy, 音频编码aac, 输出: {output_path}")
-            
-            (
-                ffmpeg
-                .output(video, audio, output_path, 
-                       vcodec='copy', acodec='aac', 
-                       strict='experimental', shortest=None)
-                .overwrite_output()
-                .run(quiet=True, capture_stdout=True, capture_stderr=True)
-            )
-            logger.info(f"音视频合并成功: {output_path}")
-            
-        except ffmpeg.Error as e:
-            error_message = e.stderr.decode('utf-8') if e.stderr else str(e)
-            logger.error(f"音视频合并FFmpeg错误:\n{error_message}")
-            
-            # 分析音频合并特定错误
-            error_analysis = []
-            if "Invalid data found when processing input" in error_message:
-                error_analysis.append("1. 音频文件可能损坏或格式不支持")
-                error_analysis.append("2. 视频文件可能损坏")
-                error_analysis.append("3. 尝试使用其他音频格式（如MP3、WAV）")
-            elif "No such file or directory" in error_message:
-                error_analysis.append("1. 输入文件路径错误")
-                error_analysis.append("2. 文件权限问题")
-            elif "Permission denied" in error_message:
-                error_analysis.append("1. 输出目录权限问题")
-                error_analysis.append("2. 尝试使用其他输出路径")
-            
-            if not error_analysis:
-                error_analysis.append("1. 未知音视频合并错误")
-                error_analysis.append("2. 请检查FFmpeg版本和支持的编码器")
-            
-            error_analysis.append("\n解决步骤:")
-            error_analysis.append("1. 验证音频文件: ffmpeg -i [音频文件路径]")
-            error_analysis.append("2. 验证视频文件: ffmpeg -i video.mp4")
-            error_analysis.append("3. 检查磁盘空间")
-            error_analysis.append("4. 尝试简化输出路径（不含特殊字符）")
-            
-            raise Exception(f"音频合并失败:\n{error_message}\n\n建议:\n{'\n'.join(error_analysis)}")
-    
+            raise PermissionError(f"Output directory is not writable: {output_dir}")
+
+        cmd = [
+            settings.FFMPEG_PATH,
+            "-y",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-i",
+            video_path,
+            "-i",
+            audio_path,
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-shortest",
+            output_path,
+        ]
+
+        self._run_ffmpeg_with_progress(
+            cmd=cmd,
+            total_duration_sec=max(0.1, expected_duration),
+            stage_message="Merging audio",
+            progress_callback=progress_callback,
+            progress_range=progress_range,
+        )
+
     def extract_audio_info(self, audio_path: str) -> Dict[str, Any]:
-        """提取音频信息"""
         try:
             probe = ffmpeg.probe(audio_path)
             audio_stream = next(
-                (stream for stream in probe['streams'] if stream['codec_type'] == 'audio'),
-                None
+                (stream for stream in probe["streams"] if stream.get("codec_type") == "audio"),
+                None,
             )
-            
             if not audio_stream:
-                raise Exception("未找到音频流")
-            
+                raise Exception("No audio stream found")
+
             return {
-                "duration": float(audio_stream.get('duration', 0)),
-                "codec": audio_stream.get('codec_name', 'unknown'),
-                "bit_rate": audio_stream.get('bit_rate', 'unknown'),
-                "sample_rate": audio_stream.get('sample_rate', 'unknown'),
-                "channels": audio_stream.get('channels', 'unknown')
+                "duration": float(audio_stream.get("duration", 0) or 0),
+                "codec": audio_stream.get("codec_name", "unknown"),
+                "bit_rate": audio_stream.get("bit_rate", "unknown"),
+                "sample_rate": audio_stream.get("sample_rate", "unknown"),
+                "channels": audio_stream.get("channels", "unknown"),
             }
-        except Exception as e:
-            raise Exception(f"音频信息提取失败: {str(e)}")
-    
+        except Exception as exc:
+            raise Exception(f"Failed to extract audio info: {exc}")
+
     def validate_video(self, video_path: str) -> bool:
-        """验证视频文件是否有效"""
         try:
             probe = ffmpeg.probe(video_path)
             video_stream = next(
-                (stream for stream in probe['streams'] if stream['codec_type'] == 'video'),
-                None
+                (stream for stream in probe["streams"] if stream.get("codec_type") == "video"),
+                None,
             )
             return video_stream is not None
-        except:
+        except Exception:
             return False
-    
+
     def get_video_duration(self, video_path: str) -> float:
-        """获取视频时长（秒）"""
         try:
             probe = ffmpeg.probe(video_path)
-            duration = float(probe['format']['duration'])
-            return duration
-        except Exception as e:
-            raise Exception(f"获取视频时长失败: {str(e)}")
-    
+            return float(probe["format"].get("duration", 0) or 0)
+        except Exception as exc:
+            raise Exception(f"Failed to get video duration: {exc}")
+
     def create_preview_video(
         self,
         image_paths: List[str],
         timeline: List[Dict[str, Any]],
         output_path: str,
         resolution: str = "640x360",
-        fps: int = 15
+        fps: int = 15,
     ) -> str:
-        """创建预览视频（低分辨率，用于快速预览）"""
         return self.create_video_from_timeline(
             image_paths=image_paths,
             timeline=timeline,
-            audio_path=None,  # 预览视频不需要音频
+            audio_path=None,
             output_path=output_path,
             resolution=resolution,
-            fps=fps
+            fps=fps,
         )
-    
+
     def convert_video_format(
         self,
         input_path: str,
         output_path: str,
-        format: str = "mp4"
+        format: str = "mp4",
     ) -> str:
-        """转换视频格式"""
         try:
             (
                 ffmpeg
                 .input(input_path)
-                .output(output_path, vcodec='libx264', acodec='aac')
+                .output(output_path, vcodec="libx264", acodec="aac")
                 .overwrite_output()
                 .run(quiet=True, capture_stdout=True, capture_stderr=True)
             )
             return output_path
-        except ffmpeg.Error as e:
-            error_message = e.stderr.decode('utf-8') if e.stderr else str(e)
-            raise Exception(f"视频格式转换失败: {error_message}")
+        except ffmpeg.Error as exc:
+            error_message = exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else str(exc)
+            raise Exception(f"Video format conversion failed: {error_message}")
