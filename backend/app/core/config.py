@@ -35,11 +35,16 @@ class Settings(BaseSettings):
     ALIGN_SWITCH_PENALTY: float = 0.08
     ALIGN_BACKTRACK_PENALTY: float = 0.15
     ALIGN_FORWARD_JUMP_PENALTY: float = 0.03
+    ALIGN_ENFORCE_SEQUENTIAL: bool = False
+    ALIGN_REQUIRE_FULL_COVERAGE: bool = False
+    ALIGN_KEEP_SHORT_SEGMENTS_FOR_COVERAGE: bool = False
     
     # 处理参数默认值
     DEFAULT_SIMILARITY_THRESHOLD: float = 0.5
     DEFAULT_MIN_DISPLAY_DURATION: float = 2.0  # 秒
     DEFAULT_OUTPUT_RESOLUTION: str = "1920x1080"
+    PPT_EXPORT_DPI: int = 300
+    VIDEO_FORCE_FIRST_SLIDE_FRAME: bool = True
     
     # 外部工具路径
     FFMPEG_PATH: str = Field(

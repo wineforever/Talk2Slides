@@ -2,6 +2,7 @@ import os
 import subprocess
 import tempfile
 import platform
+import locale
 from pathlib import Path
 from typing import List, Dict, Any
 import json
@@ -18,6 +19,15 @@ logger = logging.getLogger(__name__)
 
 class PPTService:
     """PPT处理服务"""
+
+    _cached_libreoffice_path: str = ""
+    _poppler_checked: bool = False
+    _poppler_available: bool = False
+
+    @staticmethod
+    def _safe_text_encoding() -> str:
+        enc = locale.getpreferredencoding(False)
+        return enc or "utf-8"
     
     def _get_libreoffice_path(self) -> str:
         """获取LibreOffice可执行文件路径
@@ -27,10 +37,15 @@ class PPTService:
         Returns:
             LibreOffice可执行文件完整路径
         """
+        cls = type(self)
+        if cls._cached_libreoffice_path and os.path.exists(cls._cached_libreoffice_path):
+            return cls._cached_libreoffice_path
+
         configured_path = settings.LIBREOFFICE_PATH
         
         # 如果路径已包含目录分隔符，直接返回
         if os.path.sep in configured_path or ('/' in configured_path and os.path.sep == '/'):
+            cls._cached_libreoffice_path = configured_path
             return configured_path
         
         # 检查配置的路径是否可直接执行（在PATH中）
@@ -38,6 +53,7 @@ class PPTService:
             # 使用shutil.which查找可执行文件
             which_path = shutil.which(configured_path)
             if which_path:
+                cls._cached_libreoffice_path = which_path
                 return which_path
         except:
             pass
@@ -53,6 +69,7 @@ class PPTService:
             
             for path in common_paths:
                 if os.path.exists(path):
+                    cls._cached_libreoffice_path = path
                     return path
         
         # 如果都没找到，返回配置的路径（让后续错误处理）
@@ -64,17 +81,28 @@ class PPTService:
         Returns:
             True如果poppler已安装并可用，否则False
         """
+        cls = type(self)
+        if cls._poppler_checked:
+            return cls._poppler_available
+
         try:
             # 尝试运行pdftoppm命令检查poppler是否可用
             result = subprocess.run(
                 ["pdftoppm", "-v"],
                 capture_output=True,
                 text=True,
+                encoding=self._safe_text_encoding(),
+                errors="replace",
                 timeout=5
             )
-            return result.returncode == 0 or "pdftoppm" in result.stderr or "pdftoppm" in result.stdout
+            cls._poppler_available = (
+                result.returncode == 0 or "pdftoppm" in result.stderr or "pdftoppm" in result.stdout
+            )
         except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+            cls._poppler_available = False
+
+        cls._poppler_checked = True
+        return cls._poppler_available
     
     def extract_slides(self, pptx_path: str) -> List[Dict[str, Any]]:
         """从PPTX文件中提取幻灯片文本内容
@@ -237,6 +265,8 @@ class PPTService:
                     libreoffice_cmd,
                     capture_output=True,
                     text=True,
+                    encoding=self._safe_text_encoding(),
+                    errors="replace",
                     timeout=300  # 5分钟超时
                 )
                 
@@ -255,7 +285,7 @@ class PPTService:
                 
                 images = convert_from_path(
                     str(temp_pdf),
-                    dpi=300,  # 高DPI以获得清晰图片
+                    dpi=max(72, int(settings.PPT_EXPORT_DPI)),  # 可通过配置调整导出速度/清晰度
                     size=(width, height),
                     output_folder=str(output_path),
                     fmt="png",

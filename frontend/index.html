@@ -371,6 +371,11 @@
                                 <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">提高可抑制提前跳到后面页</p>
                                 <el-slider v-model="alignForwardJumpPenalty" :min="0" :max="0.2" :step="0.01" show-input></el-slider>
                             </div>
+                            <div class="param-item">
+                                <h3>页面顺序约束</h3>
+                                <p style="color: #7f8c8d; font-size: 0.9rem; margin-bottom: 10px;">默认不限制。勾选后将禁止跳页并按顺序讲解。</p>
+                                <el-checkbox v-model="alignEnforceSequential">禁止跳页（顺序讲每页）</el-checkbox>
+                            </div>
                         </div>
                     </el-collapse-item>
                 </el-collapse>
@@ -434,6 +439,7 @@
                 const alignMaxBacktrack = ref(2);
                 const alignSwitchPenalty = ref(0.08);
                 const alignForwardJumpPenalty = ref(0.03);
+                const alignEnforceSequential = ref(false);
                 const advancedParamsOpen = ref([]);
 
                 // 处理状态
@@ -444,6 +450,11 @@
                 const resultVideoFilename = ref('generated_video.mp4');
                 const taskId = ref('');
                 const hasShownSuccess = ref(false);
+                let notificationAudio = null;
+                onMounted(() => {
+                    notificationAudio = new Audio('/api/sound');
+                    notificationAudio.preload = 'auto';
+                });
 
                 // 计算是否准备好
                 const filesReady = computed(() => {
@@ -480,21 +491,14 @@
                 // 播放提示音效
                 const playNotificationSound = () => {
                     try {
-                        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                        const oscillator = audioContext.createOscillator();
-                        const gainNode = audioContext.createGain();
-                        
-                        oscillator.connect(gainNode);
-                        gainNode.connect(audioContext.destination);
-                        
-                        oscillator.frequency.value = 800;
-                        oscillator.type = 'sine';
-                        
-                        gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-                        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-                        
-                        oscillator.start(audioContext.currentTime);
-                        oscillator.stop(audioContext.currentTime + 0.5);
+                        if (!notificationAudio) {
+                            notificationAudio = new Audio('/api/sound');
+                            notificationAudio.preload = 'auto';
+                        }
+                        notificationAudio.currentTime = 0;
+                        notificationAudio.play().catch((error) => {
+                            console.log('音效播放失败:', error);
+                        });
                     } catch (error) {
                         console.log('音效播放失败:', error);
                         // 静默失败，不影响主要功能
@@ -526,6 +530,7 @@
                     formData.append('align_max_backtrack', alignMaxBacktrack.value);
                     formData.append('align_switch_penalty', alignSwitchPenalty.value);
                     formData.append('align_forward_jump_penalty', alignForwardJumpPenalty.value);
+                    formData.append('align_enforce_sequential', alignEnforceSequential.value);
 
                     try {
                         // 上传文件并启动任务
@@ -594,6 +599,7 @@
                     alignMaxBacktrack,
                     alignSwitchPenalty,
                     alignForwardJumpPenalty,
+                    alignEnforceSequential,
                     advancedParamsOpen,
                     processing,
                     progress,

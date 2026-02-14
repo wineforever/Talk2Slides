@@ -11,8 +11,8 @@ Talk2Slides是一个智能视频生成工具，能够将PPTX演示文稿、音�
 - **🔧 智能错误处理**：严格的时间轴验证（end>start, duration>0），防止生成无效视频文件
 - **🌐 现代化Web界面**：响应式设计，支持文件拖拽上传、实时进度显示、结果预览和下载
 - **⚙️ 灵活参数配置**：可调整相似度阈值、最小展示时长、输出分辨率等参数
-- **📁 智能文件管理**：输出文件包含时间戳和任务ID，便于管理和查找
-- **🔊 用户体验优化**：处理完成音效提示，防止重复通知，清晰的错误信息
+- **📁 智能文件管理**：输出文件名为`PPT文件名_v版本号.mp4`，便于管理和查找
+- **🔊 用户体验优化**：处理完成播放项目根目录`Sound.mp3`提示音，防止重复通知，错误信息清晰
 - **🎵 多格式音频支持**：支持MP3和WAV音频格式，满足不同场景需求
 
 
@@ -175,6 +175,20 @@ where soffice       # Windows
 
 ### 4. 启动应用
 
+#### 方法零：Windows一键启动（推荐）
+```bat
+run_windows.bat
+```
+
+- 根目录配置文件：`talk2slides.ini`
+- 支持命令行覆盖参数（会覆盖`ini`中的同名项），例如：
+
+```bat
+run_windows.bat --port 9000 --reload false --similarity-threshold 0.35
+run_windows.bat --align-enforce-sequential true --align-require-full-coverage true
+run_windows.bat --set OUTPUT_DIR=F:\Talk2SlidesOutput
+```
+
 #### 方法一：直接运行（开发环境）
 ```bash
 # 1. 确保在backend目录且虚拟环境已激活
@@ -208,6 +222,32 @@ source venv/bin/activate
 gunicorn -w 4 -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:8000
 ```
 
+#### Windows服务器部署（系统服务）
+项目已提供 Windows 服务部署脚本：`scripts/windows/deploy_windows_service.ps1`
+
+```powershell
+# 1) 以管理员身份打开 PowerShell
+# 2) 进入项目根目录
+cd F:\WorkSpace\Talk2Slides
+
+# 3) 按需修改根目录配置
+notepad .\talk2slides.ini
+
+# 4) 安装/重装服务（服务名可自定义）
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\deploy_windows_service.ps1 -ServiceName Talk2Slides -Reinstall
+
+# 5) 查看服务状态
+Get-Service Talk2Slides
+```
+
+常用运维命令：
+```powershell
+Start-Service Talk2Slides
+Stop-Service Talk2Slides
+Restart-Service Talk2Slides
+sc.exe query Talk2Slides
+```
+
 **启动成功标志**：
 ```
 INFO:     Started server process [PID]
@@ -234,6 +274,7 @@ Content-Type: multipart/form-data
 - similarity_threshold: 相似度阈值 (0-1, 默认0.5)
 - min_display_duration: 最小展示时长 (秒, 默认2.0)
 - output_resolution: 输出分辨率 (默认1920x1080)
+- align_enforce_sequential: 是否禁止跳页并顺序讲解每页 (true/false, 默认false)
 ```
 
 ### 任务状态查询
@@ -279,6 +320,7 @@ GET /api/task/{task_id}/result
 - 对于**自由讨论**或**话题回退**的演讲，新算法能更好地匹配内容
 - 系统会自动记录PPT跳转统计，帮助了解内容组织模式
 - 如果相似度过低，系统会提供具体的阈值调整建议
+- 前端提供“禁止跳页（顺序讲每页）”开关，默认不勾选；仅在需要严格顺序讲解时再开启
 
 #### 🎯 相似度阈值 (0.0-1.0)
 **默认值**: 0.5  
@@ -337,7 +379,7 @@ GET /api/task/{task_id}/result
 ### 5. 查看结果
 处理完成后可以：
 - 在线预览生成的视频
-- 下载MP4文件（文件名格式：`video_{任务ID}_YYYYMMDD_HHMMSS.mp4`）
+- 下载MP4文件（文件名格式：`{PPT文件名}_v{版本号}.mp4`，例如 `招商港口投资分析_v3.mp4`）
 
 ## 🔧 调试经验与常见问题
 
@@ -514,10 +556,16 @@ Talk2Slides/
 │   └── index.html          # 单页面应用（Vue 3 + Element Plus）
 ├── output/                  # ✅ 视频输出目录（新位置）
 │   └── {task_id}/          # 按任务ID组织的输出文件
-│       └── video_{task_id}_YYYYMMDD_HHMMSS.mp4  # 生成的视频文件
+│       └── {PPT文件名}_v{版本号}.mp4  # 生成的视频文件（如：demo_v2.mp4）
 ├── temp/                    # 临时处理文件（运行时自动创建）
 │   ├── uploads/            # 上传文件临时存储
 │   └── {task_id}/          # 任务临时工作目录
+├── scripts/
+│   ├── run_windows.py      # Windows启动器（读取ini并支持命令行覆盖）
+│   └── windows/
+│       └── deploy_windows_service.ps1  # Windows服务部署脚本
+├── run_windows.bat          # Windows一键启动入口
+├── talk2slides.ini          # 根目录启动与环境参数配置
 ├── .trae/                  # Trae IDE配置文件（开发环境）
 ├── README.md               # 本文档
 └── slidesync_minimal.py    # 早期原型脚本
@@ -546,15 +594,19 @@ python -m app.main
    - PPT文件：建议不超过100页，每页文本不超过500字
    - 音频文件：建议不超过2小时，MP3或WAV格式最佳
    - 输出视频：根据需求选择分辨率，测试时使用较低分辨率
+2. **内建加速（已启用）**：
+   - 语义模型缓存：`sentence-transformers`模型在进程内复用，避免每个任务重复加载
+   - 工具探测缓存：LibreOffice路径与Poppler可用性检查结果会缓存，减少重复探测开销
 
-2. **内存管理优化**：
+3. **内存管理优化**：
    - 及时清理临时文件：任务完成后自动清理临时目录
    - 分阶段处理：PPT解析、语义对齐、视频合成分阶段进行，避免内存峰值
    - 图片缓存：同一PPT文件多次处理时可复用已导出的图片
 
-3. **处理速度优化**：
+4. **处理速度优化**：
    - 使用SSD硬盘：显著加快文件读写速度
    - 调整分辨率：测试时使用1024x576，生产时使用1280x720或1920x1080
+   - 适当降低`PPT_EXPORT_DPI`（如300→220）可显著缩短PPT转图片耗时
    - 关闭调试模式：生产环境设置`DEBUG=false`减少日志输出
 
 ### 🎯 质量与效果优化

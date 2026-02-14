@@ -15,6 +15,22 @@ logger = logging.getLogger(__name__)
 
 class VideoService:
     """视频合成服务"""
+
+    def _ensure_first_frame_is_home_slide(
+        self,
+        timeline: List[Dict[str, Any]],
+        slide_count: int
+    ) -> List[Dict[str, Any]]:
+        """确保视频第一帧来自PPT首页（slide_index=0）。"""
+        if not timeline or slide_count <= 0:
+            return timeline
+
+        normalized = [dict(segment) for segment in timeline]
+        first_idx = int(normalized[0].get("slide_index", 0))
+        if first_idx != 0:
+            logger.warning(f"首帧修正: 第一片段幻灯片索引为{first_idx}，已强制改为0")
+            normalized[0]["slide_index"] = 0
+        return normalized
     
     def _validate_image_files(self, image_paths: List[str]) -> bool:
         """验证所有图片文件是否存在且可访问
@@ -100,6 +116,12 @@ class VideoService:
             error_msg += "3. 检查PPT和SRT文件内容是否相关\n"
             error_msg += "4. 查看服务器日志获取详细诊断信息\n"
             raise ValueError(error_msg)
+
+        if settings.VIDEO_FORCE_FIRST_SLIDE_FRAME:
+            timeline = self._ensure_first_frame_is_home_slide(
+                timeline=timeline,
+                slide_count=len(image_paths)
+            )
         
         # 验证图片文件是否存在且可访问
         logger.info(f"开始验证{len(image_paths)}个图片文件")

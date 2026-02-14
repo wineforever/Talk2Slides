@@ -4,10 +4,8 @@ import os
 import uuid
 import shutil
 import logging
-from typing import Optional
-import asyncio
-from datetime import datetime
 from pathlib import Path
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +19,52 @@ from app.services.video_service import VideoService
 router = APIRouter()
 task_manager = TaskManager()
 
+_INVALID_FILENAME_CHARS = r'[<>:"/\\|?*\x00-\x1f]'
+
+
+def _sanitize_filename_stem(filename: str) -> str:
+    raw_name = (filename or "").strip()
+    raw_name = raw_name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if "." in raw_name:
+        stem = raw_name.rsplit(".", 1)[0].strip()
+    else:
+        stem = raw_name.strip()
+    if not stem:
+        stem = "presentation"
+    stem = re.sub(_INVALID_FILENAME_CHARS, "_", stem)
+    stem = re.sub(r"\s+", "_", stem).strip(" ._")
+    return stem or "presentation"
+
+
+def _next_video_version(base_stem: str) -> int:
+    pattern = re.compile(rf"^{re.escape(base_stem)}_v(\d+)\.mp4$", re.IGNORECASE)
+    max_version = 0
+    for video_file in settings.OUTPUT_DIR.rglob("*.mp4"):
+        match = pattern.match(video_file.name)
+        if not match:
+            continue
+        version = int(match.group(1))
+        if version > max_version:
+            max_version = version
+    return max_version + 1
+
 @router.options("/upload")
 async def options_upload():
     """处理CORS预检请求"""
     return Response(status_code=200)
+
+
+@router.get("/sound")
+async def get_notification_sound():
+    """返回处理完成提示音（项目根目录 Sound.mp3）"""
+    sound_path = settings.BASE_DIR.parent / "Sound.mp3"
+    if not sound_path.exists():
+        raise HTTPException(status_code=404, detail="Sound.mp3 不存在")
+    return FileResponse(
+        str(sound_path),
+        media_type="audio/mpeg",
+        filename="Sound.mp3"
+    )
 
 @router.post("/upload")
 async def upload_files(
@@ -40,7 +80,8 @@ async def upload_files(
     align_max_backtrack: int = Form(settings.ALIGN_MAX_BACKTRACK),
     align_max_forward_jump: int = Form(settings.ALIGN_MAX_FORWARD_JUMP),
     align_switch_penalty: float = Form(settings.ALIGN_SWITCH_PENALTY),
-    align_forward_jump_penalty: float = Form(settings.ALIGN_FORWARD_JUMP_PENALTY)
+    align_forward_jump_penalty: float = Form(settings.ALIGN_FORWARD_JUMP_PENALTY),
+    align_enforce_sequential: bool = Form(settings.ALIGN_ENFORCE_SEQUENTIAL)
 ):
     """上传文件并启动视频生成任务"""
     
@@ -62,6 +103,9 @@ async def upload_files(
     # 创建任务目录
     task_dir = settings.TEMP_DIR / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
+
+    # 记录原始PPT文件名，用于输出视频命名
+    pptx_original_name = Path(pptx.filename).name
     
     # 保存上传的文件
     pptx_path = task_dir / "presentation.pptx"
@@ -106,6 +150,7 @@ async def upload_files(
             str(pptx_path),
             str(mp3_path),
             str(srt_path),
+            pptx_original_name,
             similarity_threshold,
             min_display_duration,
             output_resolution,
@@ -114,7 +159,8 @@ async def upload_files(
             align_max_backtrack,
             align_max_forward_jump,
             align_switch_penalty,
-            align_forward_jump_penalty
+            align_forward_jump_penalty,
+            align_enforce_sequential
         )
         
         return {
@@ -212,6 +258,7 @@ async def process_video_generation(
     pptx_path: str,
     mp3_path: str,
     srt_path: str,
+    pptx_original_name: str,
     similarity_threshold: float,
     min_display_duration: float,
     output_resolution: str,
@@ -220,7 +267,8 @@ async def process_video_generation(
     align_max_backtrack: int,
     align_max_forward_jump: int,
     align_switch_penalty: float,
-    align_forward_jump_penalty: float
+    align_forward_jump_penalty: float,
+    align_enforce_sequential: bool
 ):
     """视频生成处理流程"""
     
@@ -237,6 +285,10 @@ async def process_video_generation(
     align_max_forward_jump = int(min(max(align_max_forward_jump, 0), 10))
     align_switch_penalty = min(max(align_switch_penalty, 0.0), 1.0)
     align_forward_jump_penalty = min(max(align_forward_jump_penalty, 0.0), 1.0)
+    if isinstance(align_enforce_sequential, str):
+        align_enforce_sequential = align_enforce_sequential.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        align_enforce_sequential = bool(align_enforce_sequential)
     
     logger.info(
         "视频生成参数: "
@@ -248,7 +300,8 @@ async def process_video_generation(
         f"align_max_backtrack={align_max_backtrack}, "
         f"align_max_forward_jump={align_max_forward_jump}, "
         f"align_switch_penalty={align_switch_penalty}, "
-        f"align_forward_jump_penalty={align_forward_jump_penalty}"
+        f"align_forward_jump_penalty={align_forward_jump_penalty}, "
+        f"align_enforce_sequential={align_enforce_sequential}"
     )
     
     # 阶段标记，用于错误诊断
@@ -314,7 +367,8 @@ async def process_video_generation(
             align_max_backtrack=align_max_backtrack,
             align_max_forward_jump=align_max_forward_jump,
             align_switch_penalty=align_switch_penalty,
-            align_forward_jump_penalty=align_forward_jump_penalty
+            align_forward_jump_penalty=align_forward_jump_penalty,
+            enforce_sequential=align_enforce_sequential
         )
         
         if not timeline:
@@ -348,9 +402,10 @@ async def process_video_generation(
         task_manager.update_task(task_id, progress=70, message="合成视频...")
         video_service = VideoService()
         
-        # 生成包含日期时间的文件名
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"video_{task_id}_{timestamp}.mp4"
+        # 输出视频命名：PPT文件名 + 版本号，例如 demo_v3.mp4
+        ppt_stem = _sanitize_filename_stem(pptx_original_name)
+        version = _next_video_version(ppt_stem)
+        filename = f"{ppt_stem}_v{version}.mp4"
         output_video_path = settings.OUTPUT_DIR / task_id / filename
         output_video_path.parent.mkdir(parents=True, exist_ok=True)
         

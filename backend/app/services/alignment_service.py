@@ -1,8 +1,9 @@
 import numpy as np
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import logging
+import threading
 
 from app.core.config import settings
 
@@ -10,6 +11,9 @@ logger = logging.getLogger(__name__)
 
 class AlignmentService:
     """语义对齐服务"""
+
+    _MODEL_CACHE: Dict[Tuple[str, Optional[str]], SentenceTransformer] = {}
+    _MODEL_CACHE_LOCK = threading.Lock()
     
     def __init__(self, model_name: str = None):
         """初始化对齐服务
@@ -18,14 +22,29 @@ class AlignmentService:
             model_name: sentence-transformers模型名称
         """
         self.model_name = model_name or settings.SENTENCE_TRANSFORMER_MODEL
+        self.model_device = (getattr(settings, "SENTENCE_TRANSFORMER_DEVICE", "") or "").strip()
         self.model = None
         # 延迟加载模型，在第一次使用时加载
     
     def _load_model(self):
         """加载预训练模型"""
         try:
-            logger.info(f"正在加载模型: {self.model_name}")
-            self.model = SentenceTransformer(self.model_name)
+            cache_key = (self.model_name, self.model_device or None)
+            with self._MODEL_CACHE_LOCK:
+                cached_model = self._MODEL_CACHE.get(cache_key)
+                if cached_model is not None:
+                    self.model = cached_model
+                    logger.info(f"复用已缓存模型: {self.model_name} device={self.model_device or 'default'}")
+                    return
+
+            logger.info(f"正在加载模型: {self.model_name} device={self.model_device or 'default'}")
+            if self.model_device:
+                loaded_model = SentenceTransformer(self.model_name, device=self.model_device)
+            else:
+                loaded_model = SentenceTransformer(self.model_name)
+            self.model = loaded_model
+            with self._MODEL_CACHE_LOCK:
+                self._MODEL_CACHE[cache_key] = loaded_model
             logger.info("模型加载完成")
         except Exception as e:
             logger.error(f"模型加载失败: {str(e)}")
@@ -41,7 +60,8 @@ class AlignmentService:
         align_max_forward_jump: int = None,
         align_switch_penalty: float = None,
         align_backtrack_penalty: float = None,
-        align_forward_jump_penalty: float = None
+        align_forward_jump_penalty: float = None,
+        enforce_sequential: Optional[bool] = None
     ) -> List[Dict[str, Any]]:
         """将幻灯片与字幕进行语义对齐
         
@@ -55,6 +75,7 @@ class AlignmentService:
             align_switch_penalty: 切换惩罚（None使用默认配置）
             align_backtrack_penalty: 回退惩罚（None使用默认配置）
             align_forward_jump_penalty: 前跳惩罚（None使用默认配置）
+            enforce_sequential: 是否禁止跳页并顺序讲解（None使用默认配置）
             
         Returns:
             时间轴映射列表，每个元素包含start, end, slide_index
@@ -76,6 +97,15 @@ class AlignmentService:
         
         logger.info(f"开始语义对齐: {len(slides)}张幻灯片, {len(subtitles)}个字幕片段")
         logger.info(f"参数设置: similarity_threshold={similarity_threshold}, min_display_duration={min_display_duration}")
+        sequential_mode = settings.ALIGN_ENFORCE_SEQUENTIAL if enforce_sequential is None else bool(enforce_sequential)
+        require_full_coverage = settings.ALIGN_REQUIRE_FULL_COVERAGE if sequential_mode else False
+        keep_short_segments = settings.ALIGN_KEEP_SHORT_SEGMENTS_FOR_COVERAGE if sequential_mode else False
+        logger.info(
+            "对齐模式: "
+            f"sequential_mode={sequential_mode}, "
+            f"require_full_coverage={require_full_coverage}, "
+            f"keep_short_segments={keep_short_segments}"
+        )
         
         max_backtrack = settings.ALIGN_MAX_BACKTRACK if align_max_backtrack is None else align_max_backtrack
         max_forward_jump = settings.ALIGN_MAX_FORWARD_JUMP if align_max_forward_jump is None else align_max_forward_jump
@@ -163,20 +193,35 @@ class AlignmentService:
             logger.warning("4. 检查字幕文本内容（前3段样本已在上方显示）")
             logger.warning("5. 如果内容相关但相似度低，考虑更换模型或优化文本清洗")
         
-        # 4. 受限回退的单调序列对齐（Viterbi/DP）
-        path = self._align_with_viterbi(
-            similarity_matrix=similarity_matrix,
-            max_backtrack=max_backtrack,
-            max_forward_jump=max_forward_jump,
-            switch_penalty=switch_penalty,
-            backtrack_penalty=backtrack_penalty,
-            forward_jump_penalty=forward_jump_penalty
+        # 4. 执行对齐：可选严格顺序模式（禁止跳页）
+        if sequential_mode:
+            path = self._align_strict_sequential(similarity_matrix=similarity_matrix)
+        else:
+            path = self._align_with_viterbi(
+                similarity_matrix=similarity_matrix,
+                max_backtrack=max_backtrack,
+                max_forward_jump=max_forward_jump,
+                switch_penalty=switch_penalty,
+                backtrack_penalty=backtrack_penalty,
+                forward_jump_penalty=forward_jump_penalty
+            )
+
+        timeline = self._apply_min_duration_constraint(
+            path=path,
+            subtitles=subtitles,
+            min_duration=min_display_duration,
+            keep_short_segments=keep_short_segments
         )
 
-        # 应用最小时长约束生成时间轴
-        timeline = self._apply_min_duration_constraint(
-            path, subtitles, min_display_duration
-        )
+        # 严格覆盖兜底：当顺序模式开启且主对齐失败时，强制按顺序覆盖每一页
+        if (not timeline) and sequential_mode and require_full_coverage:
+            logger.warning("主对齐未生成有效时间轴，启用顺序全覆盖兜底策略")
+            timeline = self._create_uniform_timeline_fallback(
+                slides=slides,
+                subtitles=subtitles,
+                min_display_duration=min_display_duration,
+                force_full_coverage=True
+            )
         
         # 如果语义对齐失败，使用备用策略
         if not timeline:
@@ -289,6 +334,102 @@ class AlignmentService:
 
         logger.info(
             f"对齐切页统计: 总片段={n_segments}, 切页次数={switch_count}, 回退次数={backtrack_count}, 最大回退页数={max_backtrack_actual}"
+        )
+
+        return [(int(i), int(path[i]), float(similarity_matrix[i, path[i]])) for i in range(n_segments)]
+
+    def _align_strict_sequential(
+        self,
+        similarity_matrix: np.ndarray
+    ) -> List[Tuple[int, int, float]]:
+        """严格顺序对齐：从第一页开始，仅允许停留或前进1页，且最终覆盖到最后一页。"""
+        if similarity_matrix is None or similarity_matrix.size == 0:
+            return []
+
+        n_segments, n_slides = similarity_matrix.shape
+        if n_segments == 0 or n_slides == 0:
+            return []
+
+        if n_segments < n_slides:
+            logger.warning(
+                f"严格顺序对齐不可行: 字幕片段数({n_segments})少于幻灯片数({n_slides})"
+            )
+            return []
+
+        dp = np.full((n_segments, n_slides), -np.inf, dtype=float)
+        prev = np.full((n_segments, n_slides), -1, dtype=int)
+
+        # 强制首段从第一页开始
+        dp[0, 0] = similarity_matrix[0, 0]
+
+        for seg_idx in range(1, n_segments):
+            for slide_idx in range(n_slides):
+                # 可达性约束：最多每段前进1页
+                if slide_idx > seg_idx:
+                    continue
+
+                # 终态可达性：剩余片段必须足够走到最后一页
+                remaining_segments = (n_segments - 1) - seg_idx
+                remaining_slides = (n_slides - 1) - slide_idx
+                if remaining_segments < remaining_slides:
+                    continue
+
+                best_score = -np.inf
+                best_prev = -1
+
+                # 1) 停留当前页
+                stay_score = dp[seg_idx - 1, slide_idx]
+                if stay_score != -np.inf:
+                    score = stay_score + similarity_matrix[seg_idx, slide_idx]
+                    if score > best_score:
+                        best_score = score
+                        best_prev = slide_idx
+
+                # 2) 仅允许前进一页
+                if slide_idx > 0:
+                    forward_score = dp[seg_idx - 1, slide_idx - 1]
+                    if forward_score != -np.inf:
+                        score = forward_score + similarity_matrix[seg_idx, slide_idx]
+                        if score > best_score:
+                            best_score = score
+                            best_prev = slide_idx - 1
+
+                dp[seg_idx, slide_idx] = best_score
+                prev[seg_idx, slide_idx] = best_prev
+
+        # 强制最后一段落在最后一页，确保全覆盖
+        last_slide = n_slides - 1
+        if dp[n_segments - 1, last_slide] == -np.inf:
+            logger.warning("严格顺序对齐失败: 无法在末段覆盖到最后一页")
+            return []
+
+        path = [last_slide]
+        for seg_idx in range(n_segments - 1, 0, -1):
+            last_slide = int(prev[seg_idx, last_slide])
+            if last_slide < 0:
+                logger.warning("严格顺序对齐回溯失败")
+                return []
+            path.append(last_slide)
+        path.reverse()
+
+        # 校验：不允许跳页，必须完整覆盖
+        max_jump = 0
+        for i in range(1, len(path)):
+            jump = path[i] - path[i - 1]
+            if jump < 0 or jump > 1:
+                logger.warning(f"严格顺序路径异常: {path[i - 1]} -> {path[i]}")
+                return []
+            max_jump = max(max_jump, jump)
+
+        covered = set(path)
+        if settings.ALIGN_REQUIRE_FULL_COVERAGE and len(covered) < n_slides:
+            logger.warning(
+                f"严格顺序路径未覆盖全部页面: 覆盖{len(covered)}/{n_slides}"
+            )
+            return []
+
+        logger.info(
+            f"严格顺序对齐成功: 片段={n_segments}, 页面={n_slides}, 最大步进={max_jump}, 首段页={path[0]}, 末段页={path[-1]}"
         )
 
         return [(int(i), int(path[i]), float(similarity_matrix[i, path[i]])) for i in range(n_segments)]
@@ -618,7 +759,8 @@ class AlignmentService:
         self,
         path: List[Tuple[int, int, float]],
         subtitles: List[Dict[str, Any]],
-        min_duration: float
+        min_duration: float,
+        keep_short_segments: bool = False
     ) -> List[Dict[str, Any]]:
         """应用最小展示时长约束
         
@@ -685,8 +827,11 @@ class AlignmentService:
             "duration": duration
         })
         
-        # 智能合并过短的片段
-        merged_timeline = self._merge_short_segments(timeline, min_duration)
+        # 顺序强约束场景可选择保留短片段，不做跨页合并
+        if keep_short_segments:
+            merged_timeline = timeline
+        else:
+            merged_timeline = self._merge_short_segments(timeline, min_duration)
         
         # 验证最终时间轴
         valid_segments = 0
@@ -848,7 +993,8 @@ class AlignmentService:
         self,
         slides: List[Dict[str, Any]],
         subtitles: List[Dict[str, Any]],
-        min_display_duration: float = 2.0
+        min_display_duration: float = 2.0,
+        force_full_coverage: bool = False
     ) -> List[Dict[str, Any]]:
         """创建均匀分布的时间轴（备用策略）
         
@@ -858,6 +1004,7 @@ class AlignmentService:
             slides: 幻灯片列表
             subtitles: 字幕片段列表
             min_display_duration: 最小展示时长（秒）
+            force_full_coverage: 是否强制每页至少分配一个时间片段
             
         Returns:
             时间轴映射列表，每个元素包含start, end, slide_index
@@ -866,77 +1013,108 @@ class AlignmentService:
             logger.warning("备用策略：幻灯片或字幕列表为空，无法创建时间轴")
             return []
         
-        logger.info("语义对齐失败，使用均匀分布备用策略")
-        
-        # 计算字幕总时长
-        if len(subtitles) == 0:
-            logger.warning("备用策略：字幕列表为空")
-            return []
-            
-        total_duration = subtitles[-1]["end"] - subtitles[0]["start"]
-        if total_duration <= 0:
-            logger.warning(f"备用策略：字幕时长无效（{total_duration}秒）")
-            total_duration = len(slides) * min_display_duration  # 使用默认时长
-        
-        # 均匀分配时间给每张幻灯片，确保至少min_display_duration秒
-        slide_duration = max(min_display_duration, total_duration / max(1, len(slides)))
-        
-        # 如果总时长不足，调整slide_duration
-        if slide_duration * len(slides) > total_duration:
-            slide_duration = total_duration / max(1, len(slides))
-        
-        # 确保slide_duration至少为0.1秒，防止除零或无效时长
-        slide_duration = max(0.1, slide_duration)
-        
-        logger.debug(f"备用策略参数: total_duration={total_duration:.2f}s, slides={len(slides)}, "
-                    f"min_display_duration={min_display_duration}s, calculated_slide_duration={slide_duration:.2f}s")
-        
-        timeline = []
-        current_time = subtitles[0]["start"]
-        
-        for i, slide in enumerate(slides):
-            end_time = current_time + slide_duration
-            
-            # 确保不超过总时长
-            if end_time > subtitles[-1]["end"]:
-                end_time = subtitles[-1]["end"]
-            
-            # 如果剩余时间太少，调整结束时间
-            if end_time - current_time < min_display_duration / 2:
-                # 时间太少，合并到前一张幻灯片（如果是第一张则扩展）
-                if timeline:
-                    last_segment = timeline[-1]
-                    last_segment["end"] = subtitles[-1]["end"]
-                    last_segment["duration"] = last_segment["end"] - last_segment["start"]
-                    logger.debug(f"备用策略：第{i}张幻灯片时间不足，合并到前一张")
+        if force_full_coverage:
+            logger.info("语义对齐失败，使用顺序全覆盖备用策略")
+
+            start_time = subtitles[0]["start"]
+            end_time = subtitles[-1]["end"]
+            total_duration = end_time - start_time
+
+            if total_duration <= 0:
+                logger.warning(f"备用策略：字幕时长无效（{total_duration}秒），使用最小兜底时长")
+                total_duration = max(0.1 * len(slides), min_display_duration)
+                end_time = start_time + total_duration
+
+            # 强制每页都有独立时间片段，避免“跳页”或“漏页”
+            slide_count = max(1, len(slides))
+            slide_duration = total_duration / slide_count
+            slide_duration = max(slide_duration, 0.001)
+
+            logger.debug(
+                f"备用策略参数: total_duration={total_duration:.3f}s, slides={slide_count}, "
+                f"min_display_duration={min_display_duration}s, assigned_slide_duration={slide_duration:.3f}s"
+            )
+
+            timeline = []
+            current_time = start_time
+
+            for i, slide in enumerate(slides):
+                if i == slide_count - 1:
+                    seg_end = end_time
                 else:
-                    # 第一张幻灯片，至少保证最小时长
-                    end_time = current_time + min_display_duration
-                    if end_time > subtitles[-1]["end"]:
-                        end_time = subtitles[-1]["end"]
-                break
-            
-            # 计算实际时长并验证
-            actual_duration = end_time - current_time
-            if actual_duration <= 0:
-                logger.warning(f"备用策略：片段{i}时长无效({actual_duration:.2f}s)，跳过此片段")
-                continue
-                
-            if end_time <= current_time:
-                logger.warning(f"备用策略：片段{i}结束时间不大于开始时间，调整结束时间")
+                    seg_end = start_time + (i + 1) * slide_duration
+
+                if seg_end <= current_time:
+                    seg_end = current_time + 0.001
+
+                timeline.append({
+                    "start": current_time,
+                    "end": seg_end,
+                    "slide_index": i,
+                    "duration": seg_end - current_time,
+                    "similarity": 0.0,
+                    "strategy": "uniform_fallback",
+                    "note": f"顺序全覆盖备用策略，原始索引: {slide.get('index', i)}"
+                })
+
+                current_time = seg_end
+        else:
+            logger.info("语义对齐失败，使用均匀分布备用策略")
+
+            total_duration = subtitles[-1]["end"] - subtitles[0]["start"]
+            if total_duration <= 0:
+                logger.warning(f"备用策略：字幕时长无效（{total_duration}秒）")
+                total_duration = len(slides) * min_display_duration
+
+            slide_duration = max(min_display_duration, total_duration / max(1, len(slides)))
+            if slide_duration * len(slides) > total_duration:
+                slide_duration = total_duration / max(1, len(slides))
+            slide_duration = max(0.1, slide_duration)
+
+            logger.debug(
+                f"备用策略参数: total_duration={total_duration:.2f}s, slides={len(slides)}, "
+                f"min_display_duration={min_display_duration}s, calculated_slide_duration={slide_duration:.2f}s"
+            )
+
+            timeline = []
+            current_time = subtitles[0]["start"]
+
+            for i, slide in enumerate(slides):
                 end_time = current_time + slide_duration
-            
-            timeline.append({
-                "start": current_time,
-                "end": end_time,
-                "slide_index": i,
-                "duration": end_time - current_time,
-                "similarity": 0.0,
-                "strategy": "uniform_fallback",
-                "note": f"备用策略生成，原始索引: {slide.get('index', i)}"
-            })
-            
-            current_time = end_time
+                if end_time > subtitles[-1]["end"]:
+                    end_time = subtitles[-1]["end"]
+
+                if end_time - current_time < min_display_duration / 2:
+                    if timeline:
+                        last_segment = timeline[-1]
+                        last_segment["end"] = subtitles[-1]["end"]
+                        last_segment["duration"] = last_segment["end"] - last_segment["start"]
+                        logger.debug(f"备用策略：第{i}张幻灯片时间不足，合并到前一张")
+                    else:
+                        end_time = current_time + min_display_duration
+                        if end_time > subtitles[-1]["end"]:
+                            end_time = subtitles[-1]["end"]
+                    break
+
+                actual_duration = end_time - current_time
+                if actual_duration <= 0:
+                    logger.warning(f"备用策略：片段{i}时长无效({actual_duration:.2f}s)，跳过此片段")
+                    continue
+
+                if end_time <= current_time:
+                    logger.warning(f"备用策略：片段{i}结束时间不大于开始时间，调整结束时间")
+                    end_time = current_time + slide_duration
+
+                timeline.append({
+                    "start": current_time,
+                    "end": end_time,
+                    "slide_index": i,
+                    "duration": end_time - current_time,
+                    "similarity": 0.0,
+                    "strategy": "uniform_fallback",
+                    "note": f"备用策略生成，原始索引: {slide.get('index', i)}"
+                })
+                current_time = end_time
         
         # 验证生成的时间轴
         validated_timeline = self._validate_timeline(timeline)
@@ -945,7 +1123,7 @@ class AlignmentService:
             logger.error("备用策略生成的时间轴无效，返回空列表")
             return []
         
-        logger.info(f"备用策略生成{len(validated_timeline)}个有效时间片段，每片约{slide_duration:.1f}秒")
+        logger.info(f"备用策略生成{len(validated_timeline)}个有效时间片段，每片约{slide_duration:.3f}秒")
         return validated_timeline
     
     def _validate_timeline(self, timeline: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
