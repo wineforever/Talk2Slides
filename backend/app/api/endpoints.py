@@ -1,6 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, HTTPException, Response
 from fastapi.responses import FileResponse
 import configparser
+import json
 import os
 import uuid
 import shutil
@@ -26,6 +27,7 @@ task_manager = TaskManager()
 
 _INVALID_FILENAME_CHARS = r'[<>:"/\\|?*\x00-\x1f]'
 _INI_WRITE_LOCK = threading.Lock()
+_PROCESS_LOG_LOCK = threading.Lock()
 _RUNTIME_TO_ENV_KEY = {
     "similarity_threshold": "DEFAULT_SIMILARITY_THRESHOLD",
     "min_display_duration": "DEFAULT_MIN_DISPLAY_DURATION",
@@ -44,7 +46,10 @@ _RUNTIME_TO_ENV_KEY = {
     "align_enforce_no_revisit": "ALIGN_ENFORCE_NO_REVISIT",
     "align_min_slide_usage_ratio": "ALIGN_MIN_SLIDE_USAGE_RATIO",
     "align_enforce_sequential": "ALIGN_ENFORCE_SEQUENTIAL",
+    "align_structure_prior_weight": "ALIGN_STRUCTURE_PRIOR_WEIGHT",
 }
+_PROCESS_LOG_PATH = settings.BASE_DIR.parent / "processing.log"
+_STRUCTURE_PRIOR_FILENAME = "structure_prior.txt"
 
 
 def _ini_path() -> Path:
@@ -90,6 +95,7 @@ def _normalize_generation_params(
     align_enforce_no_revisit: object,
     align_min_slide_usage_ratio: object,
     align_enforce_sequential: object,
+    align_structure_prior_weight: object,
 ) -> Dict[str, Any]:
     return {
         "similarity_threshold": min(max(_parse_float(similarity_threshold, settings.DEFAULT_SIMILARITY_THRESHOLD), 0.1), 0.9),
@@ -109,6 +115,7 @@ def _normalize_generation_params(
         "align_enforce_no_revisit": _parse_bool(align_enforce_no_revisit),
         "align_min_slide_usage_ratio": float(min(max(_parse_float(align_min_slide_usage_ratio, settings.ALIGN_MIN_SLIDE_USAGE_RATIO), 0.5), 1.0)),
         "align_enforce_sequential": _parse_bool(align_enforce_sequential),
+        "align_structure_prior_weight": float(min(max(_parse_float(align_structure_prior_weight, settings.ALIGN_STRUCTURE_PRIOR_WEIGHT), 0.0), 0.35)),
     }
 
 
@@ -229,6 +236,7 @@ def _load_generation_defaults() -> Dict[str, Any]:
         align_enforce_no_revisit=env_values.get("ALIGN_ENFORCE_NO_REVISIT", settings.ALIGN_ENFORCE_NO_REVISIT),
         align_min_slide_usage_ratio=env_values.get("ALIGN_MIN_SLIDE_USAGE_RATIO", settings.ALIGN_MIN_SLIDE_USAGE_RATIO),
         align_enforce_sequential=env_values.get("ALIGN_ENFORCE_SEQUENTIAL", settings.ALIGN_ENFORCE_SEQUENTIAL),
+        align_structure_prior_weight=env_values.get("ALIGN_STRUCTURE_PRIOR_WEIGHT", settings.ALIGN_STRUCTURE_PRIOR_WEIGHT),
     )
 
 
@@ -266,6 +274,114 @@ def _format_seconds(seconds: float) -> str:
     if hours > 0:
         return f"{hours:d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _safe_preview_text(value: object, max_chars: int = 120) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _append_processing_log(task_id: str, event: str, **payload: Any) -> None:
+    entry = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "task_id": task_id,
+        "event": event,
+    }
+    if payload:
+        entry.update(payload)
+    try:
+        with _PROCESS_LOG_LOCK:
+            _PROCESS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with _PROCESS_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except Exception as exc:
+        logger.warning("Failed to write processing log: %s", exc)
+
+
+def _task_elapsed_seconds(task: Any) -> Optional[float]:
+    if not getattr(task, "created_at", None):
+        return None
+    end_time = datetime.now()
+    task_state = getattr(task, "state", None)
+    if task_state in {TaskStatus.COMPLETED, TaskStatus.FAILED} and getattr(task, "updated_at", None):
+        end_time = task.updated_at
+    return max(0.0, (end_time - task.created_at).total_seconds())
+
+
+def _build_structure_prior_text(
+    task_id: str,
+    slides: list,
+    structure_meta: Dict[str, Any],
+    structure_weight: float,
+) -> str:
+    chapter_anchors = list(structure_meta.get("chapter_anchors", [])) if isinstance(structure_meta, dict) else []
+    order_to_slide = dict(structure_meta.get("order_to_slide", {})) if isinstance(structure_meta, dict) else {}
+    lines = [
+        f"task_id: {task_id}",
+        f"generated_at: {datetime.now().isoformat(timespec='seconds')}",
+        f"structure_prior_weight: {float(structure_weight):.3f}",
+        f"slide_count: {len(slides)}",
+        "",
+        "detected_structure:",
+        f"cover_slide_index: {structure_meta.get('cover_idx') if isinstance(structure_meta, dict) else None}",
+        f"toc_slide_index: {structure_meta.get('toc_idx') if isinstance(structure_meta, dict) else None}",
+        f"ending_slide_index: {structure_meta.get('ending_idx') if isinstance(structure_meta, dict) else None}",
+        "",
+        "chapter_anchors:",
+    ]
+
+    if chapter_anchors:
+        for idx, pair in enumerate(chapter_anchors, start=1):
+            slide_idx = int(pair[0]) if isinstance(pair, (list, tuple)) and len(pair) >= 1 else -1
+            order = pair[1] if isinstance(pair, (list, tuple)) and len(pair) >= 2 else None
+            lines.append(
+                f"{idx}. slide_index={slide_idx}, slide_no={slide_idx + 1 if slide_idx >= 0 else 'N/A'}, order={order}"
+            )
+    else:
+        lines.append("none")
+
+    lines.extend(["", "order_to_slide:"])
+    if order_to_slide:
+        for order, slide_idx in sorted(order_to_slide.items(), key=lambda item: int(item[0])):
+            slide_int = int(slide_idx)
+            lines.append(f"order={int(order)} -> slide_index={slide_int} (slide_no={slide_int + 1})")
+    else:
+        lines.append("none")
+
+    lines.extend(["", "slides:"])
+    for fallback_idx, slide in enumerate(slides or []):
+        slide_idx = int(slide.get("index", fallback_idx))
+        title = _safe_preview_text(slide.get("title", ""), 96) or "<empty>"
+        content = _safe_preview_text(slide.get("content", ""), 120) or "<empty>"
+        notes = _safe_preview_text(slide.get("notes", ""), 120) or "<empty>"
+        lines.append(f"slide_index={slide_idx}, slide_no={slide_idx + 1}")
+        lines.append(f"title: {title}")
+        lines.append(f"content: {content}")
+        lines.append(f"notes: {notes}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _write_structure_prior_text(
+    task_id: str,
+    task_dir: Path,
+    slides: list,
+    structure_meta: Dict[str, Any],
+    structure_weight: float,
+) -> Path:
+    task_dir.mkdir(parents=True, exist_ok=True)
+    file_path = task_dir / _STRUCTURE_PRIOR_FILENAME
+    text = _build_structure_prior_text(
+        task_id=task_id,
+        slides=slides,
+        structure_meta=structure_meta,
+        structure_weight=structure_weight,
+    )
+    file_path.write_text(text, encoding="utf-8")
+    return file_path
 
 
 def _parse_bool(value: object) -> bool:
@@ -419,6 +535,7 @@ async def get_generation_defaults():
             align_enforce_no_revisit=settings.ALIGN_ENFORCE_NO_REVISIT,
             align_min_slide_usage_ratio=settings.ALIGN_MIN_SLIDE_USAGE_RATIO,
             align_enforce_sequential=settings.ALIGN_ENFORCE_SEQUENTIAL,
+            align_structure_prior_weight=settings.ALIGN_STRUCTURE_PRIOR_WEIGHT,
         )
 
 
@@ -445,6 +562,7 @@ async def upload_files(
     align_enforce_no_revisit: bool = Form(settings.ALIGN_ENFORCE_NO_REVISIT),
     align_min_slide_usage_ratio: float = Form(settings.ALIGN_MIN_SLIDE_USAGE_RATIO),
     align_enforce_sequential: bool = Form(settings.ALIGN_ENFORCE_SEQUENTIAL),
+    align_structure_prior_weight: float = Form(settings.ALIGN_STRUCTURE_PRIOR_WEIGHT),
 ):
     if not (pptx.filename or "").lower().endswith(".pptx"):
         raise HTTPException(status_code=400, detail="PPTX file is required")
@@ -474,6 +592,7 @@ async def upload_files(
         align_enforce_no_revisit=align_enforce_no_revisit,
         align_min_slide_usage_ratio=align_min_slide_usage_ratio,
         align_enforce_sequential=align_enforce_sequential,
+        align_structure_prior_weight=align_structure_prior_weight,
     )
     similarity_threshold = float(normalized_params["similarity_threshold"])
     min_display_duration = float(normalized_params["min_display_duration"])
@@ -492,6 +611,7 @@ async def upload_files(
     align_enforce_no_revisit = bool(normalized_params["align_enforce_no_revisit"])
     align_min_slide_usage_ratio = float(normalized_params["align_min_slide_usage_ratio"])
     align_enforce_sequential = bool(normalized_params["align_enforce_sequential"])
+    align_structure_prior_weight = float(normalized_params["align_structure_prior_weight"])
 
     task_id = str(uuid.uuid4())
     task_dir = settings.TEMP_DIR / task_id
@@ -526,6 +646,16 @@ async def upload_files(
             min_display_duration=min_display_duration,
             output_resolution=output_resolution,
         )
+        _append_processing_log(
+            task_id,
+            "task_created",
+            pptx_filename=pptx_original_name,
+            audio_filename=Path(mp3.filename or "").name,
+            srt_filename=Path(srt.filename or "").name,
+            output_resolution=output_resolution,
+            similarity_threshold=similarity_threshold,
+            min_display_duration=min_display_duration,
+        )
 
         background_tasks.add_task(
             process_video_generation,
@@ -551,6 +681,7 @@ async def upload_files(
             align_enforce_no_revisit,
             align_min_slide_usage_ratio,
             align_enforce_sequential,
+            align_structure_prior_weight,
         )
 
         try:
@@ -564,6 +695,7 @@ async def upload_files(
             "message": "Upload succeeded, task started",
         }
     except Exception as exc:
+        _append_processing_log(task_id, "task_create_failed", error=str(exc))
         shutil.rmtree(task_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Failed to store uploaded files: {exc}")
 
@@ -574,12 +706,20 @@ async def get_task_status(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    elapsed_seconds: Optional[float] = None
+    elapsed_seconds: Optional[float] = _task_elapsed_seconds(task)
+    processing_duration_seconds: Optional[float] = None
+    if task.result and isinstance(task.result, dict):
+        duration_candidate = task.result.get("processing_duration_seconds")
+        if isinstance(duration_candidate, (int, float)):
+            processing_duration_seconds = float(duration_candidate)
+    if processing_duration_seconds is None:
+        processing_duration_seconds = elapsed_seconds
+    if task.state in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+        elapsed_seconds = processing_duration_seconds
     eta_seconds: Optional[float] = None
     eta_formatted: Optional[str] = None
 
-    if task.created_at:
-        elapsed_seconds = max(0.0, (datetime.now() - task.created_at).total_seconds())
+    if elapsed_seconds is not None:
         if task.state == TaskStatus.PROCESSING and task.progress > 0:
             remaining = max(0.0, 100.0 - float(task.progress))
             eta_seconds = elapsed_seconds * (remaining / float(task.progress))
@@ -592,10 +732,13 @@ async def get_task_status(task_id: str):
         "message": task.message,
         "error": task.error,
         "elapsed_seconds": elapsed_seconds,
+        "processing_duration_seconds": processing_duration_seconds,
+        "processing_duration_formatted": _format_seconds(processing_duration_seconds) if processing_duration_seconds is not None else None,
         "eta_seconds": eta_seconds,
         "eta_formatted": eta_formatted,
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+        "finished_at": task.updated_at.isoformat() if task.state in {TaskStatus.COMPLETED, TaskStatus.FAILED} and task.updated_at else None,
     }
 
 
@@ -625,6 +768,11 @@ async def get_task_preview(task_id: str):
 
     video_path = task.result.get("video_path") if task.result else None
     filename = os.path.basename(video_path) if video_path else "generated_video.mp4"
+    processing_duration_seconds = None
+    if task.result:
+        processing_duration_seconds = task.result.get("processing_duration_seconds")
+    if processing_duration_seconds is None:
+        processing_duration_seconds = _task_elapsed_seconds(task)
 
     return {
         "task_id": task_id,
@@ -632,6 +780,9 @@ async def get_task_preview(task_id: str):
         "timeline_overview": task.result.get("timeline_overview", []) if task.result else [],
         "slide_overview": task.result.get("slide_overview", []) if task.result else [],
         "alignment_report": task.result.get("alignment_report", {}) if task.result else {},
+        "processing_duration_seconds": processing_duration_seconds,
+        "processing_duration_formatted": _format_seconds(processing_duration_seconds) if processing_duration_seconds is not None else None,
+        "structure_prior_path": task.result.get("structure_prior_path") if task.result else None,
         "video_url": f"/api/task/{task_id}/result",
         "filename": filename,
     }
@@ -678,6 +829,7 @@ async def process_video_generation(
     align_enforce_no_revisit: bool,
     align_min_slide_usage_ratio: float,
     align_enforce_sequential: bool,
+    align_structure_prior_weight: float,
 ):
     normalized_params = _normalize_generation_params(
         similarity_threshold=similarity_threshold,
@@ -697,6 +849,7 @@ async def process_video_generation(
         align_enforce_no_revisit=align_enforce_no_revisit,
         align_min_slide_usage_ratio=align_min_slide_usage_ratio,
         align_enforce_sequential=align_enforce_sequential,
+        align_structure_prior_weight=align_structure_prior_weight,
     )
 
     similarity_threshold = float(normalized_params["similarity_threshold"])
@@ -716,6 +869,7 @@ async def process_video_generation(
     align_enforce_no_revisit = bool(normalized_params["align_enforce_no_revisit"])
     align_min_slide_usage_ratio = float(normalized_params["align_min_slide_usage_ratio"])
     align_enforce_sequential = bool(normalized_params["align_enforce_sequential"])
+    align_structure_prior_weight = float(normalized_params["align_structure_prior_weight"])
 
     logger.info(
         "Video generation parameters: "
@@ -735,29 +889,47 @@ async def process_video_generation(
         f"align_switch_delay_ms={align_switch_delay_ms}, "
         f"align_enforce_no_revisit={align_enforce_no_revisit}, "
         f"align_min_slide_usage_ratio={align_min_slide_usage_ratio}, "
-        f"align_enforce_sequential={align_enforce_sequential}"
+        f"align_enforce_sequential={align_enforce_sequential}, "
+        f"align_structure_prior_weight={align_structure_prior_weight}"
     )
 
     processing_stage = "initialization"
+    task_dir = Path(pptx_path).parent
+    processing_started_ts = time.perf_counter()
+    structure_prior_path: Optional[Path] = None
+
+    _append_processing_log(
+        task_id,
+        "processing_started",
+        pptx_path=pptx_path,
+        audio_path=mp3_path,
+        srt_path=srt_path,
+        parameters=normalized_params,
+    )
 
     try:
         task_manager.update_task(task_id, state=TaskStatus.PROCESSING, progress=1, message="Initializing task...")
+        _append_processing_log(task_id, "stage_started", stage=processing_stage)
 
         processing_stage = "ppt_parsing"
         task_manager.update_task(task_id, progress=10, message="Parsing PPT structure...")
+        _append_processing_log(task_id, "stage_started", stage=processing_stage)
         ppt_service = PPTService()
         slides = ppt_service.extract_slides(pptx_path)
         if not slides:
             raise ValueError("PPT parsing returned no slides")
         task_manager.update_task(task_id, progress=18, message=f"PPT parsed, detected {len(slides)} slides")
+        _append_processing_log(task_id, "stage_completed", stage=processing_stage, slide_count=len(slides))
 
         processing_stage = "srt_parsing"
         task_manager.update_task(task_id, progress=22, message="Parsing SRT subtitles...")
+        _append_processing_log(task_id, "stage_started", stage=processing_stage)
         srt_service = SRTService()
         subtitles = srt_service.parse_srt(srt_path, persist_normalized=True)
         if not subtitles:
             raise ValueError("SRT parsing returned no subtitles")
         task_manager.update_task(task_id, progress=28, message=f"SRT parsed, detected {len(subtitles)} subtitle blocks")
+        _append_processing_log(task_id, "stage_completed", stage=processing_stage, subtitle_count=len(subtitles))
 
         task_manager.update_task(task_id, progress=32, message="Preprocessing subtitles (merge/clean)...")
         segments = srt_service.preprocess_subtitles(
@@ -771,10 +943,35 @@ async def process_video_generation(
         if not segments:
             raise ValueError("Subtitle preprocessing returned no segments")
         task_manager.update_task(task_id, progress=38, message=f"Subtitle preprocessing done, {len(segments)} semantic segments kept")
+        _append_processing_log(task_id, "stage_completed", stage="subtitle_preprocess", segment_count=len(segments))
+
+        alignment_service = AlignmentService()
+        structure_meta: Dict[str, Any] = {}
+        try:
+            structure_meta = alignment_service._analyze_slide_structure(slides)
+            structure_prior_path = _write_structure_prior_text(
+                task_id=task_id,
+                task_dir=task_dir,
+                slides=slides,
+                structure_meta=structure_meta,
+                structure_weight=align_structure_prior_weight,
+            )
+            _append_processing_log(
+                task_id,
+                "structure_prior_written",
+                path=str(structure_prior_path),
+                cover_idx=structure_meta.get("cover_idx"),
+                toc_idx=structure_meta.get("toc_idx"),
+                ending_idx=structure_meta.get("ending_idx"),
+                chapter_anchor_count=len(structure_meta.get("chapter_anchors", [])),
+            )
+        except Exception as prior_exc:
+            logger.warning("Failed to write structure prior text for task %s: %s", task_id, prior_exc)
+            _append_processing_log(task_id, "structure_prior_write_failed", error=str(prior_exc))
 
         processing_stage = "alignment"
         task_manager.update_task(task_id, progress=42, message="Running SRT <-> PPT alignment...")
-        alignment_service = AlignmentService()
+        _append_processing_log(task_id, "stage_started", stage=processing_stage)
         timeline = alignment_service.align_slides_with_subtitles(
             slides=slides,
             subtitles=segments,
@@ -787,6 +984,7 @@ async def process_video_generation(
             align_switch_delay_ms=align_switch_delay_ms,
             align_enforce_no_revisit=align_enforce_no_revisit,
             align_min_slide_usage_ratio=align_min_slide_usage_ratio,
+            align_structure_prior_weight=align_structure_prior_weight,
             enforce_sequential=align_enforce_sequential,
         )
         alignment_report = alignment_service.get_last_alignment_report()
@@ -797,9 +995,11 @@ async def process_video_generation(
         slide_overview = _build_slide_overview(slides)
         timeline_overview = _build_timeline_overview(timeline, slide_overview)
         task_manager.update_task(task_id, progress=58, message=f"Alignment done, timeline segments: {len(timeline)}, grade: {grade}")
+        _append_processing_log(task_id, "stage_completed", stage=processing_stage, timeline_segments=len(timeline), grade=grade)
 
         processing_stage = "ppt_to_images"
         task_manager.update_task(task_id, progress=62, message="Exporting PPT slides to images...")
+        _append_processing_log(task_id, "stage_started", stage=processing_stage)
         image_dir = settings.TEMP_DIR / task_id / "images"
         image_dir.mkdir(parents=True, exist_ok=True)
         image_paths = ppt_service.export_slides_to_images(
@@ -810,6 +1010,7 @@ async def process_video_generation(
         if not image_paths:
             raise ValueError("PPT image export failed: no images")
         task_manager.update_task(task_id, progress=76, message=f"Slide images exported: {len(image_paths)}")
+        _append_processing_log(task_id, "stage_completed", stage=processing_stage, image_count=len(image_paths))
 
         processing_stage = "video_synthesis"
         task_manager.update_task(task_id, progress=82, message="Preparing video synthesis...")
@@ -821,6 +1022,7 @@ async def process_video_generation(
         output_video_path = settings.OUTPUT_DIR / task_id / filename
         output_video_path.parent.mkdir(parents=True, exist_ok=True)
         task_manager.update_task(task_id, progress=88, message=f"Start synthesizing video: {filename}")
+        _append_processing_log(task_id, "stage_started", stage=processing_stage, output_filename=filename)
 
         video_progress_start = 88.0
         video_progress_end = 96.0
@@ -858,6 +1060,7 @@ async def process_video_generation(
         )
         task_manager.update_task(task_id, progress=96, message="Video and audio merged, finalizing outputs...")
 
+        processing_seconds = max(0.0, time.perf_counter() - processing_started_ts)
         task_manager.update_task(
             task_id,
             state=TaskStatus.COMPLETED,
@@ -872,10 +1075,31 @@ async def process_video_generation(
                 "slide_count": len(slides),
                 "subtitle_count": len(subtitles),
                 "segment_count": len(segments),
+                "processing_duration_seconds": processing_seconds,
+                "structure_prior_path": str(structure_prior_path) if structure_prior_path else None,
             },
         )
+        _append_processing_log(
+            task_id,
+            "processing_completed",
+            stage=processing_stage,
+            output_video_path=str(output_video_path),
+            processing_duration_seconds=round(processing_seconds, 3),
+            slide_count=len(slides),
+            subtitle_count=len(subtitles),
+            segment_count=len(segments),
+            timeline_segments=len(timeline),
+        )
     except Exception as exc:
+        processing_seconds = max(0.0, time.perf_counter() - processing_started_ts)
         logger.error(f"Video generation failed at stage={processing_stage}: {exc}", exc_info=True)
+        _append_processing_log(
+            task_id,
+            "processing_failed",
+            stage=processing_stage,
+            error=str(exc),
+            processing_duration_seconds=round(processing_seconds, 3),
+        )
         task_manager.update_task(
             task_id,
             state=TaskStatus.FAILED,

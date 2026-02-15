@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     ALIGN_SEMANTIC_WEIGHT: float = 0.70
     ALIGN_LEXICAL_WEIGHT: float = 0.22
     ALIGN_NUMERIC_WEIGHT: float = 0.08
+    ALIGN_STRUCTURE_PRIOR_WEIGHT: float = 0.16
     ALIGN_LOW_CONFIDENCE_MARGIN: float = 0.08
     ALIGN_BOUNDARY_CROSS_MIN: float = 0.02
     ALIGN_ENFORCE_NO_REVISIT: bool = True

@@ -370,6 +370,11 @@
                             <el-slider v-model="alignMinSlideUsageRatio" :min="0.5" :max="1.0" :step="0.05" show-input></el-slider>
                         </div>
                         <div class="param-item">
+                            <h3>结构先验权重</h3>
+                            <p class="tip">按首页/目录/章节/结束页结构增强对齐（0 为关闭）</p>
+                            <el-slider v-model="alignStructurePriorWeight" :min="0" :max="0.35" :step="0.01" show-input></el-slider>
+                        </div>
+                        <div class="param-item">
                             <h3>禁止跳页（顺序讲每页）</h3>
                             <p class="tip">可选项，默认不勾选</p>
                             <el-checkbox v-model="alignEnforceSequential">启用</el-checkbox>
@@ -424,6 +429,16 @@
                 </a>
             </div>
 
+            <div class="quality-section">
+                <div class="quality-title">处理耗时</div>
+                <div class="quality-grid">
+                    <div class="quality-item">
+                        <div class="label">总耗时</div>
+                        <div class="value">{{ totalProcessingDurationText }}</div>
+                    </div>
+                </div>
+            </div>
+
             <div v-if="alignmentReport && alignmentReport.summary" class="quality-section">
                 <div class="quality-title">对齐质量报告</div>
                 <div class="quality-grid">
@@ -449,7 +464,11 @@
                     </div>
                     <div class="quality-item">
                         <div class="label">策略参数</div>
-                        <div class="value">no_revisit={{ (alignmentReport.coverage_policy && alignmentReport.coverage_policy.enforce_no_revisit) ? 'on' : 'off' }}, min_usage={{ formatPercent(alignmentReport.coverage_policy && alignmentReport.coverage_policy.min_slide_usage_ratio) }}</div>
+                        <div class="value">
+                            no_revisit={{ (alignmentReport.coverage_policy && alignmentReport.coverage_policy.enforce_no_revisit) ? 'on' : 'off' }},
+                            min_usage={{ formatPercent(alignmentReport.coverage_policy && alignmentReport.coverage_policy.min_slide_usage_ratio) }},
+                            structure_w={{ (alignmentReport.scoring && alignmentReport.scoring.weights) ? Number(alignmentReport.scoring.weights.structure || 0).toFixed(2) : '0.00' }}
+                        </div>
                     </div>
                 </div>
             </div>
@@ -485,6 +504,7 @@ createApp({
         const alignSwitchDelayMs = ref(250);
         const alignEnforceNoRevisit = ref(true);
         const alignMinSlideUsageRatio = ref(0.70);
+        const alignStructurePriorWeight = ref(0.16);
         const alignEnforceSequential = ref(false);
         const advancedParamsOpen = ref([]);
 
@@ -493,6 +513,7 @@ createApp({
         const progressText = ref('');
         const elapsedText = ref('--:--');
         const etaText = ref('--:--');
+        const totalProcessingDurationText = ref('--:--');
         const resultVideoUrl = ref('');
         const resultVideoFilename = ref('generated_video.mp4');
         const alignmentReport = ref(null);
@@ -580,6 +601,7 @@ createApp({
                 alignSwitchDelayMs.value = toNumberOr(data.align_switch_delay_ms, alignSwitchDelayMs.value);
                 alignEnforceNoRevisit.value = toBoolOr(data.align_enforce_no_revisit, alignEnforceNoRevisit.value);
                 alignMinSlideUsageRatio.value = toNumberOr(data.align_min_slide_usage_ratio, alignMinSlideUsageRatio.value);
+                alignStructurePriorWeight.value = toNumberOr(data.align_structure_prior_weight, alignStructurePriorWeight.value);
                 alignEnforceSequential.value = toBoolOr(data.align_enforce_sequential, alignEnforceSequential.value);
             } catch (err) {
                 console.warn('Failed to load defaults from /api/defaults:', err);
@@ -721,6 +743,7 @@ createApp({
             progressText.value = 'Preparing upload...';
             elapsedText.value = '00:00';
             etaText.value = '--:--';
+            totalProcessingDurationText.value = '--:--';
             resultVideoUrl.value = '';
             resultVideoFilename.value = 'generated_video.mp4';
             alignmentReport.value = null;
@@ -749,6 +772,7 @@ createApp({
             formData.append('align_switch_delay_ms', alignSwitchDelayMs.value);
             formData.append('align_enforce_no_revisit', alignEnforceNoRevisit.value);
             formData.append('align_min_slide_usage_ratio', alignMinSlideUsageRatio.value);
+            formData.append('align_structure_prior_weight', alignStructurePriorWeight.value);
             formData.append('align_enforce_sequential', alignEnforceSequential.value);
 
             try {
@@ -771,6 +795,9 @@ createApp({
                         progress.value = 30 + Math.floor(status.progress * 0.7);
                         progressText.value = status.message || 'Processing...';
                         elapsedText.value = formatDuration(status.elapsed_seconds);
+                        const statusDurationSeconds = status.processing_duration_seconds ?? status.elapsed_seconds;
+                        if (status.processing_duration_formatted) totalProcessingDurationText.value = status.processing_duration_formatted;
+                        else totalProcessingDurationText.value = formatDuration(statusDurationSeconds);
                         if (status.eta_formatted) etaText.value = status.eta_formatted;
                         else if (status.state === 'completed') etaText.value = '00:00';
                         else if (status.state === 'processing') etaText.value = 'calculating...';
@@ -790,6 +817,8 @@ createApp({
                             timelineOverview.value = (Array.isArray(preview.timeline_overview) && preview.timeline_overview.length)
                                 ? normalizeTimelineOverview(preview.timeline_overview)
                                 : buildTimelineOverviewFallback(preview.timeline);
+                            if (preview.processing_duration_formatted) totalProcessingDurationText.value = preview.processing_duration_formatted;
+                            else totalProcessingDurationText.value = formatDuration(preview.processing_duration_seconds ?? statusDurationSeconds);
                             videoDurationSec.value = 0;
                             currentPlaybackSec.value = 0;
 
@@ -831,6 +860,7 @@ createApp({
             alignSwitchDelayMs,
             alignEnforceNoRevisit,
             alignMinSlideUsageRatio,
+            alignStructurePriorWeight,
             alignEnforceSequential,
             advancedParamsOpen,
             processing,
@@ -838,6 +868,7 @@ createApp({
             progressText,
             elapsedText,
             etaText,
+            totalProcessingDurationText,
             resultVideoUrl,
             resultVideoFilename,
             alignmentReport,

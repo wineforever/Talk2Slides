@@ -17,6 +17,17 @@ class AlignmentService:
     _MODEL_CACHE: Dict[Tuple[str, Optional[str]], SentenceTransformer] = {}
     _MODEL_CACHE_LOCK = threading.Lock()
     _SIGNAL_TOKEN_RE = re.compile(r"[A-Za-z]*\d+[A-Za-z0-9]*|\d+(?:\.\d+)?%?|[A-Za-z]{2,}")
+    _TOC_RE = re.compile(r"(目录|目次|议程|agenda|contents?)", re.IGNORECASE)
+    _END_RE = re.compile(r"(谢谢|感谢|结语|结束|答疑|q\s*&\s*a|the\s+end|thanks?)", re.IGNORECASE)
+    _CHAPTER_RE = re.compile(
+        r"(第[一二三四五六七八九十两\d]+[章节部分点条]|^[一二三四五六七八九十两]+[、.．)]|^\d{1,2}[、.．)]|首先|其次|再次|最后)"
+    )
+    _OPENING_CUE_RE = re.compile(r"(开场|首先|第一|先说|先看)")
+    _ENDING_CUE_RE = re.compile(r"(最后|总结|综上|总之|结语|结束)")
+    _CN_NUM_MAP = {
+        "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+        "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    }
     
     def __init__(self, model_name: str = None):
         """鍒濆鍖栧榻愭湇鍔?        
@@ -29,6 +40,205 @@ class AlignmentService:
         self.last_alignment_report: Dict[str, Any] = {}
         # 寤惰繜鍔犺浇妯″瀷锛屽湪绗竴娆′娇鐢ㄦ椂鍔犺浇
     
+    def _normalize_structure_text(self, text: str) -> str:
+        normalized = str(text or "").strip().lower()
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized
+
+    def _chinese_numeral_to_int(self, token: str) -> Optional[int]:
+        token = str(token or "").strip()
+        if not token:
+            return None
+        if token.isdigit():
+            value = int(token)
+            return value if 0 < value <= 99 else None
+        if token in self._CN_NUM_MAP:
+            return self._CN_NUM_MAP[token]
+        if len(token) == 2 and token[0] == "\u5341":
+            tail = self._CN_NUM_MAP.get(token[1])
+            if tail is not None:
+                return 10 + tail
+        if len(token) == 2 and token[1] == "\u5341":
+            head = self._CN_NUM_MAP.get(token[0])
+            if head is not None:
+                return head * 10
+        if len(token) == 3 and token[1] == "\u5341":
+            head = self._CN_NUM_MAP.get(token[0])
+            tail = self._CN_NUM_MAP.get(token[2])
+            if head is not None and tail is not None:
+                return head * 10 + tail
+        return None
+
+    def _extract_ordinal_number(self, text: str) -> Optional[int]:
+        normalized = self._normalize_structure_text(text)
+        if not normalized:
+            return None
+
+        m = re.search(r"\u7b2c([\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u4e24\d]{1,3})[\u7ae0\u8282\u90e8\u5206\u70b9\u6761]", normalized)
+        if m:
+            return self._chinese_numeral_to_int(m.group(1))
+
+        m = re.search(r"(?:^|\s)(\d{1,2})[\u3001\.\uff0e\)]", normalized)
+        if m:
+            return self._chinese_numeral_to_int(m.group(1))
+
+        m = re.search(r"(?:^|\s)([\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u4e24]{1,3})[\u3001\.\uff0e\)]", normalized)
+        if m:
+            return self._chinese_numeral_to_int(m.group(1))
+
+        en_map = {
+            "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+            "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
+        }
+        for token, value in en_map.items():
+            if re.search(rf"\b{token}\b", normalized):
+                return value
+        return None
+
+    def _analyze_slide_structure(self, slides: List[Dict[str, Any]]) -> Dict[str, Any]:
+        slide_count = len(slides)
+        if slide_count == 0:
+            return {
+                "cover_idx": 0,
+                "toc_idx": None,
+                "ending_idx": None,
+                "chapter_anchors": [],
+                "order_to_slide": {},
+            }
+
+        slide_texts: List[str] = []
+        title_texts: List[str] = []
+        for slide in slides:
+            title = (slide.get("title") or "").strip()
+            content = (slide.get("content") or "").strip()
+            notes = (slide.get("notes") or "").strip()
+            full_text = (slide.get("full_text") or "").strip()
+            title_norm = self._normalize_structure_text(title)
+            text_norm = self._normalize_structure_text(" ".join([title, content, notes, full_text]))
+            title_texts.append(title_norm)
+            slide_texts.append(text_norm)
+
+        cover_idx = 0
+        toc_idx: Optional[int] = None
+        for idx in range(min(4, slide_count)):
+            if self._TOC_RE.search(slide_texts[idx]):
+                toc_idx = idx
+                break
+
+        ending_idx: Optional[int] = None
+        for idx in range(slide_count - 1, max(-1, slide_count - 4), -1):
+            if self._END_RE.search(slide_texts[idx]):
+                ending_idx = idx
+                break
+
+        chapter_anchors: List[Tuple[int, Optional[int]]] = []
+        scan_start = 1 if slide_count > 1 else 0
+        scan_end = ending_idx if ending_idx is not None else slide_count
+        for idx in range(scan_start, scan_end):
+            if toc_idx is not None and idx == toc_idx:
+                continue
+            title_like = title_texts[idx] or slide_texts[idx]
+            if not title_like:
+                continue
+            looks_like_chapter = bool(self._CHAPTER_RE.search(title_like))
+            if looks_like_chapter and len(title_like) <= 80:
+                chapter_anchors.append((idx, self._extract_ordinal_number(title_like)))
+
+        if not chapter_anchors:
+            content_start = 1 + (1 if toc_idx == 1 else 0)
+            content_end = ending_idx if ending_idx is not None else slide_count
+            span = max(0, content_end - content_start)
+            if span >= 5:
+                anchor_count = 3 if span >= 9 else 2
+                for i in range(anchor_count):
+                    pos = content_start + int(round(i * (span - 1) / max(1, anchor_count - 1)))
+                    chapter_anchors.append((pos, i + 1))
+
+        chapter_anchors = sorted({(int(idx), order) for idx, order in chapter_anchors}, key=lambda x: x[0])
+        order_to_slide: Dict[int, int] = {}
+        for rank, (idx, order) in enumerate(chapter_anchors, start=1):
+            key = int(order) if order is not None else rank
+            if key not in order_to_slide:
+                order_to_slide[key] = int(idx)
+
+        return {
+            "cover_idx": int(cover_idx),
+            "toc_idx": int(toc_idx) if toc_idx is not None else None,
+            "ending_idx": int(ending_idx) if ending_idx is not None else None,
+            "chapter_anchors": [(int(i), int(o) if o is not None else None) for i, o in chapter_anchors],
+            "order_to_slide": {int(k): int(v) for k, v in order_to_slide.items()},
+        }
+
+    def _build_structure_prior_matrix(
+        self,
+        slides: List[Dict[str, Any]],
+        subtitles: List[Dict[str, Any]],
+        subtitle_texts: List[str],
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        rows = len(subtitles)
+        cols = len(slides)
+        prior = np.zeros((rows, cols), dtype=float)
+        if rows == 0 or cols == 0:
+            return prior, {}
+
+        structure = self._analyze_slide_structure(slides)
+        cover_idx = int(structure.get("cover_idx", 0))
+        toc_idx = structure.get("toc_idx")
+        ending_idx = structure.get("ending_idx")
+        order_to_slide = structure.get("order_to_slide", {})
+
+        first_start = float(subtitles[0].get("start", 0.0))
+        last_end = float(subtitles[-1].get("end", first_start))
+        total = max(1e-6, last_end - first_start)
+
+        slide_axis = np.arange(cols, dtype=float)
+        temporal_sigma = max(1.5, cols * 0.22)
+        ordinal_sigma = max(1.0, cols * 0.10)
+
+        def _gaussian(center: float, sigma: float) -> np.ndarray:
+            if sigma <= 0:
+                sigma = 1.0
+            weights = np.exp(-((slide_axis - center) ** 2) / (2.0 * sigma * sigma))
+            peak = float(weights.max()) if weights.size else 1.0
+            return weights / max(1e-6, peak)
+
+        for row_idx, subtitle in enumerate(subtitles):
+            start = float(subtitle.get("start", first_start))
+            end = float(subtitle.get("end", start))
+            mid = (start + end) * 0.5
+            ratio = float(min(1.0, max(0.0, (mid - first_start) / total)))
+
+            expected_slide = ratio * max(0, cols - 1)
+            prior[row_idx, :] += 0.20 * _gaussian(expected_slide, temporal_sigma)
+
+            text = subtitle_texts[row_idx] if row_idx < len(subtitle_texts) else ""
+            ordinal = self._extract_ordinal_number(text)
+            if ordinal is not None and ordinal in order_to_slide:
+                target = float(order_to_slide[ordinal])
+                prior[row_idx, :] += 0.24 * _gaussian(target, ordinal_sigma)
+
+            if ratio <= 0.12:
+                prior[row_idx, cover_idx] += 0.30
+                if toc_idx is not None:
+                    prior[row_idx, int(toc_idx)] += 0.14
+            if ratio >= 0.90 and ending_idx is not None:
+                prior[row_idx, int(ending_idx)] += 0.30
+
+            if self._OPENING_CUE_RE.search(text):
+                prior[row_idx, cover_idx] += 0.12
+                if toc_idx is not None:
+                    prior[row_idx, int(toc_idx)] += 0.06
+            if self._ENDING_CUE_RE.search(text) and ending_idx is not None:
+                prior[row_idx, int(ending_idx)] += 0.18
+
+            if ending_idx is not None and ratio < 0.45:
+                prior[row_idx, int(ending_idx)] -= 0.10
+            if ratio > 0.55:
+                prior[row_idx, cover_idx] -= 0.08
+
+        np.clip(prior, -0.6, 0.6, out=prior)
+        return prior, structure
+
     def _load_model(self):
         """鍔犺浇棰勮缁冩ā鍨?"""
         try:
@@ -67,6 +277,7 @@ class AlignmentService:
         align_switch_delay_ms: Optional[int] = None,
         align_enforce_no_revisit: Optional[bool] = None,
         align_min_slide_usage_ratio: Optional[float] = None,
+        align_structure_prior_weight: Optional[float] = None,
         enforce_sequential: Optional[bool] = None
     ) -> List[Dict[str, Any]]:
         """将幻灯片与字幕进行语义对齐并输出时间轴。"""
@@ -106,6 +317,12 @@ class AlignmentService:
         semantic_weight = float(max(0.0, settings.ALIGN_SEMANTIC_WEIGHT))
         lexical_weight = float(max(0.0, settings.ALIGN_LEXICAL_WEIGHT))
         numeric_weight = float(max(0.0, settings.ALIGN_NUMERIC_WEIGHT))
+        structure_weight_raw = (
+            settings.ALIGN_STRUCTURE_PRIOR_WEIGHT
+            if align_structure_prior_weight is None
+            else float(align_structure_prior_weight)
+        )
+        structure_weight = float(min(max(structure_weight_raw, 0.0), 0.35))
         total_weight = semantic_weight + lexical_weight + numeric_weight
         if total_weight <= 0:
             semantic_weight, lexical_weight, numeric_weight = 1.0, 0.0, 0.0
@@ -118,7 +335,8 @@ class AlignmentService:
             "开始语义对齐: "
             f"slides={len(slides)}, subtitles={len(subtitles)}, threshold={similarity_threshold}, "
             f"switch_delay_ms={switch_delay_ms}, sequential={sequential_mode}, "
-            f"no_revisit={enforce_no_revisit}, min_usage_ratio={min_slide_usage_ratio:.2f}"
+            f"no_revisit={enforce_no_revisit}, min_usage_ratio={min_slide_usage_ratio:.2f}, "
+            f"structure_weight={structure_weight:.2f}"
         )
 
         slide_texts = self._build_slide_alignment_texts(slides)
@@ -132,12 +350,22 @@ class AlignmentService:
         semantic_similarity_matrix = cosine_similarity(subtitle_embeddings, slide_embeddings)
         lexical_similarity_matrix = self._compute_lexical_similarity_matrix(slide_texts, subtitle_texts)
         numeric_bonus_matrix = self._compute_numeric_bonus_matrix(slide_texts, subtitle_texts)
+        structure_prior_matrix = np.empty((0, 0), dtype=float)
+        structure_meta: Dict[str, Any] = {}
+        if structure_weight > 0:
+            structure_prior_matrix, structure_meta = self._build_structure_prior_matrix(
+                slides=slides,
+                subtitles=subtitles,
+                subtitle_texts=subtitle_texts,
+            )
 
         similarity_matrix = (
             semantic_weight * semantic_similarity_matrix
             + lexical_weight * lexical_similarity_matrix
             + numeric_weight * numeric_bonus_matrix
         )
+        if structure_weight > 0 and structure_prior_matrix.size:
+            similarity_matrix = similarity_matrix + structure_weight * structure_prior_matrix
 
         max_similarities = similarity_matrix.max(axis=1) if similarity_matrix.size else np.array([])
         avg_similarity = float(max_similarities.mean()) if len(max_similarities) > 0 else 0.0
@@ -151,6 +379,14 @@ class AlignmentService:
             f"avg={avg_similarity:.3f}, P10={p10:.3f}, P50={p50:.3f}, P90={p90:.3f}, "
             f"matches={matches_above_threshold}/{len(subtitles)}"
         )
+
+        if structure_meta:
+            logger.info(
+                "Structure prior enabled: "
+                f"weight={structure_weight:.2f}, toc={structure_meta.get('toc_idx')}, "
+                f"ending={structure_meta.get('ending_idx')}, "
+                f"chapters={len(structure_meta.get('chapter_anchors', []))}"
+            )
 
         if sequential_mode:
             path = self._align_strict_sequential(similarity_matrix=similarity_matrix)
@@ -216,7 +452,8 @@ class AlignmentService:
             scoring_weights={
                 "semantic": semantic_weight,
                 "lexical": lexical_weight,
-                "numeric": numeric_weight
+                "numeric": numeric_weight,
+                "structure": structure_weight
             },
             coverage_policy={
                 "enforce_no_revisit": bool(enforce_no_revisit),
@@ -224,6 +461,8 @@ class AlignmentService:
                 "sequential_mode": bool(sequential_mode)
             }
         )
+        if structure_meta:
+            self.last_alignment_report["structure"] = structure_meta
 
         if not timeline:
             logger.warning("语义对齐失败，没有生成任何时间片段")
@@ -402,7 +641,8 @@ class AlignmentService:
                 "weights": {
                     "semantic": float(scoring_weights.get("semantic", 0.0)),
                     "lexical": float(scoring_weights.get("lexical", 0.0)),
-                    "numeric": float(scoring_weights.get("numeric", 0.0))
+                    "numeric": float(scoring_weights.get("numeric", 0.0)),
+                    "structure": float(scoring_weights.get("structure", 0.0))
                 }
             },
             "timing_policy": {
