@@ -100,6 +100,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--align-require-full-coverage", help="true/false")
     p.add_argument("--align-keep-short-segments-for-coverage", help="true/false")
     p.add_argument("--video-force-first-slide-frame", help="true/false")
+    p.add_argument("--video-burn-srt-subtitles", help="true/false")
 
     # arbitrary env overrides
     p.add_argument(
@@ -191,6 +192,7 @@ def main() -> int:
         "ALIGN_REQUIRE_FULL_COVERAGE": args.align_require_full_coverage,
         "ALIGN_KEEP_SHORT_SEGMENTS_FOR_COVERAGE": args.align_keep_short_segments_for_coverage,
         "VIDEO_FORCE_FIRST_SLIDE_FRAME": args.video_force_first_slide_frame,
+        "VIDEO_BURN_SRT_SUBTITLES": args.video_burn_srt_subtitles,
     }
     for key, value in cli_env_updates.items():
         if value is not None:

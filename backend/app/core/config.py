@@ -1,35 +1,36 @@
-import os
 import platform
 from pathlib import Path
-from pydantic_settings import BaseSettings
+
 from pydantic import Field
+from pydantic_settings import BaseSettings
+
 
 class Settings(BaseSettings):
-    """应用配置"""
-    
-    # 基础配置
+    """Application settings."""
+
+    # Base settings
     APP_NAME: str = "Video Generation API"
     DEBUG: bool = True
     HOST: str = "0.0.0.0"
     PORT: int = 8000
-    
-    # 路径配置
+
+    # Paths
     BASE_DIR: Path = Path(__file__).parent.parent.parent
     TEMP_DIR: Path = BASE_DIR / "temp"
     OUTPUT_DIR: Path = BASE_DIR.parent / "output"
     UPLOAD_DIR: Path = TEMP_DIR / "uploads"
-    
-    # 模型配置
+
+    # Model
     SENTENCE_TRANSFORMER_MODEL: str = "paraphrase-multilingual-MiniLM-L12-v2"
 
-    # SRT预处理参数
+    # SRT preprocess
     SRT_MERGE_GAP_SEC: float = 0.6
     SRT_MIN_CHARS: int = 6
     SRT_MIN_DURATION_SEC: float = 0.8
     SRT_MAX_CHARS: int = 120
     SRT_FILLER_PATTERNS: str = "嗯|啊|呃|就是|然后|其实|这个|那个|你知道吗|对|好|嗯嗯"
 
-    # 对齐约束参数
+    # Alignment constraints
     ALIGN_MAX_BACKTRACK: int = 2
     ALIGN_MAX_FORWARD_JUMP: int = 5
     ALIGN_SWITCH_PENALTY: float = 0.08
@@ -47,33 +48,35 @@ class Settings(BaseSettings):
     ALIGN_ENFORCE_SEQUENTIAL: bool = False
     ALIGN_REQUIRE_FULL_COVERAGE: bool = False
     ALIGN_KEEP_SHORT_SEGMENTS_FOR_COVERAGE: bool = False
-    
-    # 处理参数默认值
+
+    # Runtime defaults
     DEFAULT_SIMILARITY_THRESHOLD: float = 0.5
-    DEFAULT_MIN_DISPLAY_DURATION: float = 2.0  # 秒
+    DEFAULT_MIN_DISPLAY_DURATION: float = 2.0
     DEFAULT_OUTPUT_RESOLUTION: str = "1920x1080"
     PPT_EXPORT_DPI: int = 300
     VIDEO_FORCE_FIRST_SLIDE_FRAME: bool = True
     VIDEO_FORCE_LAST_SLIDE_TAIL_SEC: float = 5.0
     VIDEO_EMBED_PROGRESS_BAR: bool = True
+    VIDEO_BURN_SRT_SUBTITLES: bool = True
     VIDEO_PROGRESS_MAX_SEGMENTS: int = 10
     VIDEO_PROGRESS_LABEL_MAX_CHARS: int = 10
-    
-    # 外部工具路径
+
+    # External tools
     FFMPEG_PATH: str = Field(
         default="ffmpeg",
-        description="FFmpeg可执行文件路径"
+        description="Path to ffmpeg executable",
     )
     LIBREOFFICE_PATH: str = Field(
         default="soffice.exe" if platform.system() == "Windows" else "soffice",
-        description="LibreOffice可执行文件路径，Windows需要.exe扩展名"
+        description="Path to LibreOffice executable",
     )
-    
-    # 任务配置
-    MAX_TASK_AGE_HOURS: int = 24  # 任务最大保留时间（小时）
-    
+
+    # Task lifecycle
+    MAX_TASK_AGE_HOURS: int = 24
+
     class Config:
         env_file = ".env"
         case_sensitive = True
+
 
 settings = Settings()

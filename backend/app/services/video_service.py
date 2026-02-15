@@ -107,6 +107,9 @@ class VideoService:
             compact = fallback
         chunks = [part.strip() for part in re.split(r"[。！？!?；;，,：:|]", compact) if part.strip()]
         compact = chunks[0] if chunks else compact
+        parts_by_space = [part for part in compact.split(" ") if part]
+        if len(parts_by_space) > 1:
+            compact = parts_by_space[0]
         max_len = max(3, int(max_chars))
         if len(compact) > max_len:
             compact = compact[:max_len].rstrip(" -_，,。；;：:")
@@ -432,6 +435,24 @@ class VideoService:
     def _normalize_path_for_ffmpeg(self, path: str) -> str:
         return str(Path(path).resolve()).replace("\\", "/")
 
+    def _escape_subtitles_filter_path(self, path: str) -> str:
+        # Escape filtergraph metacharacters for subtitles=filename=...
+        safe = self._normalize_path_for_ffmpeg(path)
+        safe = safe.replace("\\", "\\\\")
+        safe = safe.replace(":", "\\:")
+        safe = safe.replace("'", "\\'")
+        safe = safe.replace(",", "\\,")
+        safe = safe.replace("[", "\\[")
+        safe = safe.replace("]", "\\]")
+        return safe
+
+    def _build_subtitles_filter(self, srt_path: str) -> str:
+        subtitle_file = Path(srt_path)
+        if not subtitle_file.exists():
+            raise FileNotFoundError(f"SRT file not found for subtitle burn-in: {srt_path}")
+        escaped_path = self._escape_subtitles_filter_path(str(subtitle_file))
+        return f"subtitles='{escaped_path}':charenc=UTF-8"
+
     def _invoke_progress(
         self,
         progress_callback: Optional[Callable[[float, str], None]],
@@ -553,6 +574,8 @@ class VideoService:
         timeline: List[Dict[str, Any]],
         audio_path: str,
         output_path: str,
+        srt_path: Optional[str] = None,
+        burn_srt_subtitles: bool = False,
         timeline_overview: Optional[List[Dict[str, Any]]] = None,
         embed_progress_bar: bool = True,
         progress_max_segments: int = 10,
@@ -565,6 +588,10 @@ class VideoService:
             raise ValueError("image_paths must not be empty")
         if not timeline:
             raise ValueError("timeline must not be empty")
+        if burn_srt_subtitles and not srt_path:
+            raise ValueError("srt_path is required when burn_srt_subtitles is enabled")
+        if burn_srt_subtitles and srt_path and not Path(srt_path).exists():
+            raise FileNotFoundError(f"SRT file not found: {srt_path}")
 
         self._invoke_progress(progress_callback, 0.01, "Validating timeline and files...")
 
@@ -616,6 +643,8 @@ class VideoService:
                 height=height,
                 fps=fps,
                 expected_duration=max(0.1, timeline_total_duration),
+                srt_path=srt_path,
+                burn_srt_subtitles=burn_srt_subtitles,
                 progress_callback=progress_callback,
                 progress_range=(0.20, 0.70),
             )
@@ -765,17 +794,23 @@ class VideoService:
         height: int,
         fps: int,
         expected_duration: float,
+        srt_path: Optional[str] = None,
+        burn_srt_subtitles: bool = False,
         progress_callback: Optional[Callable[[float, str], None]] = None,
         progress_range: Tuple[float, float] = (0.0, 1.0),
     ) -> None:
         if not concat_file.exists():
             raise FileNotFoundError(f"Concat file not found: {concat_file}")
 
-        vf = (
-            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
-            f"fps={int(fps)},format=yuv420p"
-        )
+        vf_filters = [
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+            f"fps={int(fps)}",
+        ]
+        if burn_srt_subtitles and srt_path:
+            vf_filters.append(self._build_subtitles_filter(srt_path))
+        vf_filters.append("format=yuv420p")
+        vf = ",".join(vf_filters)
         cpu_encoder_args = self._build_video_encoder_args("libx264")
 
         cmd = [
@@ -799,7 +834,7 @@ class VideoService:
         self._run_ffmpeg_with_progress(
             cmd=cmd,
             total_duration_sec=expected_duration,
-            stage_message="Stitching slides",
+            stage_message="Stitching slides and subtitles" if burn_srt_subtitles else "Stitching slides",
             progress_callback=progress_callback,
             progress_range=progress_range,
         )
@@ -836,7 +871,7 @@ class VideoService:
         separator_color = "0x6A7785"
         active_overlay_color = "0xFFFFFF@0.10"
         text_base_color = "0xD8DEE7"
-        text_active_color = "0xFFFFFF"
+        text_active_color = "0x101010"
         font_size = max(10, int(round(bar_height * 0.52)))
         font_option = self._pick_drawtext_font_option()
         font_prefix = (font_option + ":") if font_option else ""
@@ -890,15 +925,7 @@ class VideoService:
             safe_label = self._escape_drawtext_text(label)
             start_t = float(seg["start"])
             end_t = float(seg["end"])
-            fade = min(0.3, max(0.08, (end_t - start_t) * 0.25))
-            rise_end = min(end_t, start_t + fade)
-            fall_start = max(start_t, end_t - fade)
-            alpha_expr = (
-                f"if(lt(t\\,{start_t:.3f})\\,0\\,"
-                f"if(lt(t\\,{rise_end:.3f})\\,(t-{start_t:.3f})/{max(0.001, rise_end - start_t):.3f}\\,"
-                f"if(lt(t\\,{fall_start:.3f})\\,1\\,"
-                f"if(lt(t\\,{end_t:.3f})\\,({end_t:.3f}-t)/{max(0.001, end_t - fall_start):.3f}\\,0))))"
-            )
+            alpha_expr = f"if(lt(t\\,{end_t:.3f})\\,0\\,1)"
             common = (
                 f"{font_prefix}text='{safe_label}':fontsize={font_size}:"
                 f"x={int(seg['x'])}+({int(seg['w'])}-text_w)/2:y=(h-text_h)/2"

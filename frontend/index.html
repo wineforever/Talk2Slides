@@ -389,6 +389,11 @@
                             <p class="tip">每段文字超出后自动以 ... 缩略</p>
                             <el-slider v-model="progressLabelMaxChars" :min="3" :max="20" :step="1" show-input></el-slider>
                         </div>
+                        <div class="param-item">
+                            <h3>SRT 字幕压制</h3>
+                            <p class="tip">将上传的 SRT 字幕直接压制到导出视频画面</p>
+                            <el-checkbox v-model="burnSrtSubtitles">启用（默认）</el-checkbox>
+                        </div>
                     </div>
                 </el-collapse-item>
             </el-collapse>
@@ -468,6 +473,7 @@ createApp({
         const minDisplayDuration = ref(2.0);
         const outputResolution = ref('1920x1080');
         const embedProgressBar = ref(true);
+        const burnSrtSubtitles = ref(true);
         const progressMaxSegments = ref(10);
         const progressLabelMaxChars = ref(10);
         const srtMergeGapSec = ref(0.6);
@@ -562,6 +568,7 @@ createApp({
                     ? data.output_resolution.trim()
                     : outputResolution.value;
                 embedProgressBar.value = toBoolOr(data.embed_progress_bar, embedProgressBar.value);
+                burnSrtSubtitles.value = toBoolOr(data.burn_srt_subtitles, burnSrtSubtitles.value);
                 progressMaxSegments.value = toNumberOr(data.progress_max_segments, progressMaxSegments.value);
                 progressLabelMaxChars.value = toNumberOr(data.progress_label_max_chars, progressLabelMaxChars.value);
                 srtMergeGapSec.value = toNumberOr(data.srt_merge_gap_sec, srtMergeGapSec.value);
@@ -730,6 +737,7 @@ createApp({
             formData.append('min_display_duration', minDisplayDuration.value);
             formData.append('output_resolution', outputResolution.value);
             formData.append('embed_progress_bar', embedProgressBar.value);
+            formData.append('burn_srt_subtitles', burnSrtSubtitles.value);
             formData.append('progress_max_segments', progressMaxSegments.value);
             formData.append('progress_label_max_chars', progressLabelMaxChars.value);
             formData.append('srt_merge_gap_sec', srtMergeGapSec.value);
@@ -811,6 +819,7 @@ createApp({
             minDisplayDuration,
             outputResolution,
             embedProgressBar,
+            burnSrtSubtitles,
             progressMaxSegments,
             progressLabelMaxChars,
             srtMergeGapSec,

@@ -31,6 +31,7 @@ _RUNTIME_TO_ENV_KEY = {
     "min_display_duration": "DEFAULT_MIN_DISPLAY_DURATION",
     "output_resolution": "DEFAULT_OUTPUT_RESOLUTION",
     "embed_progress_bar": "VIDEO_EMBED_PROGRESS_BAR",
+    "burn_srt_subtitles": "VIDEO_BURN_SRT_SUBTITLES",
     "progress_max_segments": "VIDEO_PROGRESS_MAX_SEGMENTS",
     "progress_label_max_chars": "VIDEO_PROGRESS_LABEL_MAX_CHARS",
     "srt_merge_gap_sec": "SRT_MERGE_GAP_SEC",
@@ -76,6 +77,7 @@ def _normalize_generation_params(
     min_display_duration: object,
     output_resolution: object,
     embed_progress_bar: object,
+    burn_srt_subtitles: object,
     progress_max_segments: object,
     progress_label_max_chars: object,
     srt_merge_gap_sec: object,
@@ -94,6 +96,7 @@ def _normalize_generation_params(
         "min_display_duration": max(_parse_float(min_display_duration, settings.DEFAULT_MIN_DISPLAY_DURATION), 1.0),
         "output_resolution": _normalize_output_resolution(output_resolution),
         "embed_progress_bar": _parse_bool(embed_progress_bar),
+        "burn_srt_subtitles": _parse_bool(burn_srt_subtitles),
         "progress_max_segments": int(min(max(_parse_int(progress_max_segments, settings.VIDEO_PROGRESS_MAX_SEGMENTS), 2), 60)),
         "progress_label_max_chars": int(min(max(_parse_int(progress_label_max_chars, settings.VIDEO_PROGRESS_LABEL_MAX_CHARS), 3), 32)),
         "srt_merge_gap_sec": min(max(_parse_float(srt_merge_gap_sec, settings.SRT_MERGE_GAP_SEC), 0.0), 3.0),
@@ -213,6 +216,7 @@ def _load_generation_defaults() -> Dict[str, Any]:
         min_display_duration=env_values.get("DEFAULT_MIN_DISPLAY_DURATION", settings.DEFAULT_MIN_DISPLAY_DURATION),
         output_resolution=env_values.get("DEFAULT_OUTPUT_RESOLUTION", settings.DEFAULT_OUTPUT_RESOLUTION),
         embed_progress_bar=env_values.get("VIDEO_EMBED_PROGRESS_BAR", settings.VIDEO_EMBED_PROGRESS_BAR),
+        burn_srt_subtitles=env_values.get("VIDEO_BURN_SRT_SUBTITLES", settings.VIDEO_BURN_SRT_SUBTITLES),
         progress_max_segments=env_values.get("VIDEO_PROGRESS_MAX_SEGMENTS", settings.VIDEO_PROGRESS_MAX_SEGMENTS),
         progress_label_max_chars=env_values.get("VIDEO_PROGRESS_LABEL_MAX_CHARS", settings.VIDEO_PROGRESS_LABEL_MAX_CHARS),
         srt_merge_gap_sec=env_values.get("SRT_MERGE_GAP_SEC", settings.SRT_MERGE_GAP_SEC),
@@ -402,6 +406,7 @@ async def get_generation_defaults():
             min_display_duration=settings.DEFAULT_MIN_DISPLAY_DURATION,
             output_resolution=settings.DEFAULT_OUTPUT_RESOLUTION,
             embed_progress_bar=settings.VIDEO_EMBED_PROGRESS_BAR,
+            burn_srt_subtitles=settings.VIDEO_BURN_SRT_SUBTITLES,
             progress_max_segments=settings.VIDEO_PROGRESS_MAX_SEGMENTS,
             progress_label_max_chars=settings.VIDEO_PROGRESS_LABEL_MAX_CHARS,
             srt_merge_gap_sec=settings.SRT_MERGE_GAP_SEC,
@@ -427,6 +432,7 @@ async def upload_files(
     min_display_duration: float = Form(settings.DEFAULT_MIN_DISPLAY_DURATION),
     output_resolution: str = Form(settings.DEFAULT_OUTPUT_RESOLUTION),
     embed_progress_bar: bool = Form(settings.VIDEO_EMBED_PROGRESS_BAR),
+    burn_srt_subtitles: bool = Form(settings.VIDEO_BURN_SRT_SUBTITLES),
     progress_max_segments: int = Form(settings.VIDEO_PROGRESS_MAX_SEGMENTS),
     progress_label_max_chars: int = Form(settings.VIDEO_PROGRESS_LABEL_MAX_CHARS),
     srt_merge_gap_sec: float = Form(settings.SRT_MERGE_GAP_SEC),
@@ -455,6 +461,7 @@ async def upload_files(
         min_display_duration=min_display_duration,
         output_resolution=output_resolution,
         embed_progress_bar=embed_progress_bar,
+        burn_srt_subtitles=burn_srt_subtitles,
         progress_max_segments=progress_max_segments,
         progress_label_max_chars=progress_label_max_chars,
         srt_merge_gap_sec=srt_merge_gap_sec,
@@ -472,6 +479,7 @@ async def upload_files(
     min_display_duration = float(normalized_params["min_display_duration"])
     output_resolution = str(normalized_params["output_resolution"])
     embed_progress_bar = bool(normalized_params["embed_progress_bar"])
+    burn_srt_subtitles = bool(normalized_params["burn_srt_subtitles"])
     progress_max_segments = int(normalized_params["progress_max_segments"])
     progress_label_max_chars = int(normalized_params["progress_label_max_chars"])
     srt_merge_gap_sec = float(normalized_params["srt_merge_gap_sec"])
@@ -530,6 +538,7 @@ async def upload_files(
             min_display_duration,
             output_resolution,
             embed_progress_bar,
+            burn_srt_subtitles,
             progress_max_segments,
             progress_label_max_chars,
             srt_merge_gap_sec,
@@ -656,6 +665,7 @@ async def process_video_generation(
     min_display_duration: float,
     output_resolution: str,
     embed_progress_bar: bool,
+    burn_srt_subtitles: bool,
     progress_max_segments: int,
     progress_label_max_chars: int,
     srt_merge_gap_sec: float,
@@ -674,6 +684,7 @@ async def process_video_generation(
         min_display_duration=min_display_duration,
         output_resolution=output_resolution,
         embed_progress_bar=embed_progress_bar,
+        burn_srt_subtitles=burn_srt_subtitles,
         progress_max_segments=progress_max_segments,
         progress_label_max_chars=progress_label_max_chars,
         srt_merge_gap_sec=srt_merge_gap_sec,
@@ -692,6 +703,7 @@ async def process_video_generation(
     min_display_duration = float(normalized_params["min_display_duration"])
     output_resolution = str(normalized_params["output_resolution"])
     embed_progress_bar = bool(normalized_params["embed_progress_bar"])
+    burn_srt_subtitles = bool(normalized_params["burn_srt_subtitles"])
     progress_max_segments = int(normalized_params["progress_max_segments"])
     progress_label_max_chars = int(normalized_params["progress_label_max_chars"])
     srt_merge_gap_sec = float(normalized_params["srt_merge_gap_sec"])
@@ -711,6 +723,7 @@ async def process_video_generation(
         f"min_display_duration={min_display_duration}, "
         f"output_resolution={output_resolution}, "
         f"embed_progress_bar={embed_progress_bar}, "
+        f"burn_srt_subtitles={burn_srt_subtitles}, "
         f"progress_max_segments={progress_max_segments}, "
         f"progress_label_max_chars={progress_label_max_chars}, "
         f"srt_merge_gap_sec={srt_merge_gap_sec}, "
@@ -741,7 +754,7 @@ async def process_video_generation(
         processing_stage = "srt_parsing"
         task_manager.update_task(task_id, progress=22, message="Parsing SRT subtitles...")
         srt_service = SRTService()
-        subtitles = srt_service.parse_srt(srt_path)
+        subtitles = srt_service.parse_srt(srt_path, persist_normalized=True)
         if not subtitles:
             raise ValueError("SRT parsing returned no subtitles")
         task_manager.update_task(task_id, progress=28, message=f"SRT parsed, detected {len(subtitles)} subtitle blocks")
@@ -834,6 +847,8 @@ async def process_video_generation(
             timeline=timeline,
             audio_path=mp3_path,
             output_path=str(output_video_path),
+            srt_path=srt_path,
+            burn_srt_subtitles=burn_srt_subtitles,
             timeline_overview=timeline_overview,
             embed_progress_bar=embed_progress_bar,
             progress_max_segments=progress_max_segments,
