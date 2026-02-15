@@ -374,6 +374,21 @@
                             <p class="tip">可选项，默认不勾选</p>
                             <el-checkbox v-model="alignEnforceSequential">启用</el-checkbox>
                         </div>
+                        <div class="param-item">
+                            <h3>嵌入视频进度条</h3>
+                            <p class="tip">将结构化进度条直接渲染到视频底部画面</p>
+                            <el-checkbox v-model="embedProgressBar">启用（默认）</el-checkbox>
+                        </div>
+                        <div class="param-item">
+                            <h3>进度条分段上限</h3>
+                            <p class="tip">分段过多时自动合并短段，避免过密</p>
+                            <el-slider v-model="progressMaxSegments" :min="2" :max="30" :step="1" show-input></el-slider>
+                        </div>
+                        <div class="param-item">
+                            <h3>文案最大字数</h3>
+                            <p class="tip">每段文字超出后自动以 ... 缩略</p>
+                            <el-slider v-model="progressLabelMaxChars" :min="3" :max="20" :step="1" show-input></el-slider>
+                        </div>
                     </div>
                 </el-collapse-item>
             </el-collapse>
@@ -452,6 +467,9 @@ createApp({
         const similarityThreshold = ref(0.5);
         const minDisplayDuration = ref(2.0);
         const outputResolution = ref('1920x1080');
+        const embedProgressBar = ref(true);
+        const progressMaxSegments = ref(10);
+        const progressLabelMaxChars = ref(10);
         const srtMergeGapSec = ref(0.6);
         const srtMinDurationSec = ref(0.8);
         const alignMaxForwardJump = ref(5);
@@ -543,6 +561,9 @@ createApp({
                 outputResolution.value = (typeof data.output_resolution === 'string' && data.output_resolution.trim())
                     ? data.output_resolution.trim()
                     : outputResolution.value;
+                embedProgressBar.value = toBoolOr(data.embed_progress_bar, embedProgressBar.value);
+                progressMaxSegments.value = toNumberOr(data.progress_max_segments, progressMaxSegments.value);
+                progressLabelMaxChars.value = toNumberOr(data.progress_label_max_chars, progressLabelMaxChars.value);
                 srtMergeGapSec.value = toNumberOr(data.srt_merge_gap_sec, srtMergeGapSec.value);
                 srtMinDurationSec.value = toNumberOr(data.srt_min_duration_sec, srtMinDurationSec.value);
                 alignMaxBacktrack.value = toNumberOr(data.align_max_backtrack, alignMaxBacktrack.value);
@@ -708,6 +729,9 @@ createApp({
             formData.append('similarity_threshold', similarityThreshold.value);
             formData.append('min_display_duration', minDisplayDuration.value);
             formData.append('output_resolution', outputResolution.value);
+            formData.append('embed_progress_bar', embedProgressBar.value);
+            formData.append('progress_max_segments', progressMaxSegments.value);
+            formData.append('progress_label_max_chars', progressLabelMaxChars.value);
             formData.append('srt_merge_gap_sec', srtMergeGapSec.value);
             formData.append('srt_min_duration_sec', srtMinDurationSec.value);
             formData.append('align_max_forward_jump', alignMaxForwardJump.value);
@@ -786,6 +810,9 @@ createApp({
             similarityThreshold,
             minDisplayDuration,
             outputResolution,
+            embedProgressBar,
+            progressMaxSegments,
+            progressLabelMaxChars,
             srtMergeGapSec,
             srtMinDurationSec,
             alignMaxForwardJump,

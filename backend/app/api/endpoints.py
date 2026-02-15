@@ -30,6 +30,9 @@ _RUNTIME_TO_ENV_KEY = {
     "similarity_threshold": "DEFAULT_SIMILARITY_THRESHOLD",
     "min_display_duration": "DEFAULT_MIN_DISPLAY_DURATION",
     "output_resolution": "DEFAULT_OUTPUT_RESOLUTION",
+    "embed_progress_bar": "VIDEO_EMBED_PROGRESS_BAR",
+    "progress_max_segments": "VIDEO_PROGRESS_MAX_SEGMENTS",
+    "progress_label_max_chars": "VIDEO_PROGRESS_LABEL_MAX_CHARS",
     "srt_merge_gap_sec": "SRT_MERGE_GAP_SEC",
     "srt_min_duration_sec": "SRT_MIN_DURATION_SEC",
     "align_max_backtrack": "ALIGN_MAX_BACKTRACK",
@@ -72,6 +75,9 @@ def _normalize_generation_params(
     similarity_threshold: object,
     min_display_duration: object,
     output_resolution: object,
+    embed_progress_bar: object,
+    progress_max_segments: object,
+    progress_label_max_chars: object,
     srt_merge_gap_sec: object,
     srt_min_duration_sec: object,
     align_max_backtrack: object,
@@ -87,6 +93,9 @@ def _normalize_generation_params(
         "similarity_threshold": min(max(_parse_float(similarity_threshold, settings.DEFAULT_SIMILARITY_THRESHOLD), 0.1), 0.9),
         "min_display_duration": max(_parse_float(min_display_duration, settings.DEFAULT_MIN_DISPLAY_DURATION), 1.0),
         "output_resolution": _normalize_output_resolution(output_resolution),
+        "embed_progress_bar": _parse_bool(embed_progress_bar),
+        "progress_max_segments": int(min(max(_parse_int(progress_max_segments, settings.VIDEO_PROGRESS_MAX_SEGMENTS), 2), 60)),
+        "progress_label_max_chars": int(min(max(_parse_int(progress_label_max_chars, settings.VIDEO_PROGRESS_LABEL_MAX_CHARS), 3), 32)),
         "srt_merge_gap_sec": min(max(_parse_float(srt_merge_gap_sec, settings.SRT_MERGE_GAP_SEC), 0.0), 3.0),
         "srt_min_duration_sec": min(max(_parse_float(srt_min_duration_sec, settings.SRT_MIN_DURATION_SEC), 0.1), 5.0),
         "align_max_backtrack": int(min(max(_parse_int(align_max_backtrack, settings.ALIGN_MAX_BACKTRACK), 0), 5)),
@@ -203,6 +212,9 @@ def _load_generation_defaults() -> Dict[str, Any]:
         similarity_threshold=env_values.get("DEFAULT_SIMILARITY_THRESHOLD", settings.DEFAULT_SIMILARITY_THRESHOLD),
         min_display_duration=env_values.get("DEFAULT_MIN_DISPLAY_DURATION", settings.DEFAULT_MIN_DISPLAY_DURATION),
         output_resolution=env_values.get("DEFAULT_OUTPUT_RESOLUTION", settings.DEFAULT_OUTPUT_RESOLUTION),
+        embed_progress_bar=env_values.get("VIDEO_EMBED_PROGRESS_BAR", settings.VIDEO_EMBED_PROGRESS_BAR),
+        progress_max_segments=env_values.get("VIDEO_PROGRESS_MAX_SEGMENTS", settings.VIDEO_PROGRESS_MAX_SEGMENTS),
+        progress_label_max_chars=env_values.get("VIDEO_PROGRESS_LABEL_MAX_CHARS", settings.VIDEO_PROGRESS_LABEL_MAX_CHARS),
         srt_merge_gap_sec=env_values.get("SRT_MERGE_GAP_SEC", settings.SRT_MERGE_GAP_SEC),
         srt_min_duration_sec=env_values.get("SRT_MIN_DURATION_SEC", settings.SRT_MIN_DURATION_SEC),
         align_max_backtrack=env_values.get("ALIGN_MAX_BACKTRACK", settings.ALIGN_MAX_BACKTRACK),
@@ -389,6 +401,9 @@ async def get_generation_defaults():
             similarity_threshold=settings.DEFAULT_SIMILARITY_THRESHOLD,
             min_display_duration=settings.DEFAULT_MIN_DISPLAY_DURATION,
             output_resolution=settings.DEFAULT_OUTPUT_RESOLUTION,
+            embed_progress_bar=settings.VIDEO_EMBED_PROGRESS_BAR,
+            progress_max_segments=settings.VIDEO_PROGRESS_MAX_SEGMENTS,
+            progress_label_max_chars=settings.VIDEO_PROGRESS_LABEL_MAX_CHARS,
             srt_merge_gap_sec=settings.SRT_MERGE_GAP_SEC,
             srt_min_duration_sec=settings.SRT_MIN_DURATION_SEC,
             align_max_backtrack=settings.ALIGN_MAX_BACKTRACK,
@@ -411,6 +426,9 @@ async def upload_files(
     similarity_threshold: float = Form(settings.DEFAULT_SIMILARITY_THRESHOLD),
     min_display_duration: float = Form(settings.DEFAULT_MIN_DISPLAY_DURATION),
     output_resolution: str = Form(settings.DEFAULT_OUTPUT_RESOLUTION),
+    embed_progress_bar: bool = Form(settings.VIDEO_EMBED_PROGRESS_BAR),
+    progress_max_segments: int = Form(settings.VIDEO_PROGRESS_MAX_SEGMENTS),
+    progress_label_max_chars: int = Form(settings.VIDEO_PROGRESS_LABEL_MAX_CHARS),
     srt_merge_gap_sec: float = Form(settings.SRT_MERGE_GAP_SEC),
     srt_min_duration_sec: float = Form(settings.SRT_MIN_DURATION_SEC),
     align_max_backtrack: int = Form(settings.ALIGN_MAX_BACKTRACK),
@@ -436,6 +454,9 @@ async def upload_files(
         similarity_threshold=similarity_threshold,
         min_display_duration=min_display_duration,
         output_resolution=output_resolution,
+        embed_progress_bar=embed_progress_bar,
+        progress_max_segments=progress_max_segments,
+        progress_label_max_chars=progress_label_max_chars,
         srt_merge_gap_sec=srt_merge_gap_sec,
         srt_min_duration_sec=srt_min_duration_sec,
         align_max_backtrack=align_max_backtrack,
@@ -450,6 +471,9 @@ async def upload_files(
     similarity_threshold = float(normalized_params["similarity_threshold"])
     min_display_duration = float(normalized_params["min_display_duration"])
     output_resolution = str(normalized_params["output_resolution"])
+    embed_progress_bar = bool(normalized_params["embed_progress_bar"])
+    progress_max_segments = int(normalized_params["progress_max_segments"])
+    progress_label_max_chars = int(normalized_params["progress_label_max_chars"])
     srt_merge_gap_sec = float(normalized_params["srt_merge_gap_sec"])
     srt_min_duration_sec = float(normalized_params["srt_min_duration_sec"])
     align_max_backtrack = int(normalized_params["align_max_backtrack"])
@@ -505,6 +529,9 @@ async def upload_files(
             similarity_threshold,
             min_display_duration,
             output_resolution,
+            embed_progress_bar,
+            progress_max_segments,
+            progress_label_max_chars,
             srt_merge_gap_sec,
             srt_min_duration_sec,
             align_max_backtrack,
@@ -628,6 +655,9 @@ async def process_video_generation(
     similarity_threshold: float,
     min_display_duration: float,
     output_resolution: str,
+    embed_progress_bar: bool,
+    progress_max_segments: int,
+    progress_label_max_chars: int,
     srt_merge_gap_sec: float,
     srt_min_duration_sec: float,
     align_max_backtrack: int,
@@ -643,6 +673,9 @@ async def process_video_generation(
         similarity_threshold=similarity_threshold,
         min_display_duration=min_display_duration,
         output_resolution=output_resolution,
+        embed_progress_bar=embed_progress_bar,
+        progress_max_segments=progress_max_segments,
+        progress_label_max_chars=progress_label_max_chars,
         srt_merge_gap_sec=srt_merge_gap_sec,
         srt_min_duration_sec=srt_min_duration_sec,
         align_max_backtrack=align_max_backtrack,
@@ -658,6 +691,9 @@ async def process_video_generation(
     similarity_threshold = float(normalized_params["similarity_threshold"])
     min_display_duration = float(normalized_params["min_display_duration"])
     output_resolution = str(normalized_params["output_resolution"])
+    embed_progress_bar = bool(normalized_params["embed_progress_bar"])
+    progress_max_segments = int(normalized_params["progress_max_segments"])
+    progress_label_max_chars = int(normalized_params["progress_label_max_chars"])
     srt_merge_gap_sec = float(normalized_params["srt_merge_gap_sec"])
     srt_min_duration_sec = float(normalized_params["srt_min_duration_sec"])
     align_max_backtrack = int(normalized_params["align_max_backtrack"])
@@ -674,6 +710,9 @@ async def process_video_generation(
         f"similarity_threshold={similarity_threshold}, "
         f"min_display_duration={min_display_duration}, "
         f"output_resolution={output_resolution}, "
+        f"embed_progress_bar={embed_progress_bar}, "
+        f"progress_max_segments={progress_max_segments}, "
+        f"progress_label_max_chars={progress_label_max_chars}, "
         f"srt_merge_gap_sec={srt_merge_gap_sec}, "
         f"srt_min_duration_sec={srt_min_duration_sec}, "
         f"align_max_backtrack={align_max_backtrack}, "
@@ -796,6 +835,9 @@ async def process_video_generation(
             audio_path=mp3_path,
             output_path=str(output_video_path),
             timeline_overview=timeline_overview,
+            embed_progress_bar=embed_progress_bar,
+            progress_max_segments=progress_max_segments,
+            progress_label_max_chars=progress_label_max_chars,
             resolution=output_resolution,
             progress_callback=_video_progress_callback,
         )

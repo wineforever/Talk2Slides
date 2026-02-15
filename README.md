@@ -4,6 +4,14 @@
 
 Talk2Slides是一个智能视频生成工具，能够将PPTX演示文稿、音频文件（支持MP3/WAV格式）和SRT字幕文件自动合成为一个视频。系统使用语义对齐技术，让视频中的幻灯片根据语音内容智能切换，实现完美的音画同步。
 
+## 🚀 快速开始（Windows）
+
+1. 准备依赖：Python 3.9+、FFmpeg、LibreOffice。
+2. 在项目根目录执行：`run_windows.bat`
+3. 服务加载完成后会自动弹出：`http://localhost:8000/`
+
+如未自动弹出，可手动访问上述地址。
+
 ## ✨ 核心特性
 
 - **🎯 语义智能对齐**：使用`sentence-transformers`模型计算PPT页面文本与字幕文本的语义相似度，实现内容驱动的幻灯片切换
@@ -96,12 +104,6 @@ cd backend
 # 2. 创建Python虚拟环境
 python -m venv venv
 
-# Install dependencies
-pip install -r requirements.txt
-
-# (Optional) Install PyTorch manually, Example (CPU only):
-pip install torch torchvision torchaudio
-
 # 3. 激活虚拟环境
 # Windows (PowerShell)
 venv\Scripts\activate
@@ -161,6 +163,9 @@ SENTENCE_TRANSFORMER_MODEL=all-MiniLM-L6-v2  # 语义相似度计算模型
 # DEFAULT_SIMILARITY_THRESHOLD=0.5
 # DEFAULT_MIN_DISPLAY_DURATION=2.0
 # DEFAULT_OUTPUT_RESOLUTION=1920x1080
+# VIDEO_EMBED_PROGRESS_BAR=true
+# VIDEO_PROGRESS_MAX_SEGMENTS=10
+# VIDEO_PROGRESS_LABEL_MAX_CHARS=10
 ```
 
 **🔍 路径查找方法**：
@@ -182,13 +187,21 @@ run_windows.bat
 ```
 
 - 根目录配置文件：`talk2slides.ini`
+- 默认会在服务可访问后自动打开浏览器：`http://localhost:8000/`
 - 支持命令行覆盖参数（会覆盖`ini`中的同名项），例如：
 
 ```bat
 run_windows.bat --port 9000 --reload false --similarity-threshold 0.35
 run_windows.bat --align-enforce-sequential true --align-require-full-coverage true
 run_windows.bat --set OUTPUT_DIR=F:\Talk2SlidesOutput
+run_windows.bat --open-browser false
+run_windows.bat --port 9001 --browser-url http://localhost:9001/
 ```
+
+`talk2slides.ini` 的 `[launcher]` 常用项：
+- `open_browser = true`：启动后自动打开页面
+- `browser_timeout_sec = 120`：等待服务可访问的最长秒数
+- `browser_url = http://localhost:8000/`：可选，手动指定打开地址
 
 #### 方法一：直接运行（开发环境）
 ```bash
@@ -373,8 +386,13 @@ GET /api/task/{task_id}/result
 #### 📌 视频底部结构化进度条（内嵌）
 - 进度条属于视频内容本身，固定贴底，不额外增加黑边，不改变视频构图比例
 - 分段宽度严格按时间轴时长占比计算，默认收敛到约10段，避免分段过密
-- 分段文字优先使用PPT标题，再从备注/正文提炼短语，保证读起来更通顺
-- 过短分段会自动隐藏文字，避免重叠；播放时当前分段和文字会轻微高亮
+- 每个分段都有文字描述；若文案超出分段宽度，会自动显示为 `...` 缩略形式
+- 分段文字优先使用PPT标题，再从备注/正文提炼短语，播放时当前分段和文字会轻微高亮
+
+#### 🧩 进度条可配置项（前端可调 + 自动记忆）
+- `是否嵌入进度条`：默认启用（勾选）
+- `进度条分段上限`：控制结构段数量（默认 `10`）
+- `文案最大字数`：控制段内文案最大长度（默认 `10`），超宽后自动 `...` 缩略
 
 ### 4. 开始处理
 点击"开始生成视频"按钮，系统将：

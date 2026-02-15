@@ -11,6 +11,10 @@ import configparser
 import os
 import subprocess
 import sys
+import threading
+import time
+import urllib.request
+import webbrowser
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
@@ -72,6 +76,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int)
     p.add_argument("--reload", help="true/false")
     p.add_argument("--log-level")
+    p.add_argument("--open-browser", help="true/false. Open web UI when server is reachable.")
+    p.add_argument("--browser-url", help="Override browser URL. Default: http://localhost:{port}/")
+    p.add_argument("--browser-timeout-sec", type=int, help="How long to wait for server before giving up.")
 
     # common env overrides
     p.add_argument("--debug", help="true/false")
@@ -106,6 +113,20 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def wait_and_open_browser(url: str, timeout_sec: int = 120) -> None:
+    deadline = time.time() + max(1, int(timeout_sec))
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                status = getattr(resp, "status", 200)
+                if int(status) >= 200:
+                    webbrowser.open(url, new=2, autoraise=True)
+                    return
+        except Exception:
+            pass
+        time.sleep(1)
+
+
 def main() -> int:
     args = build_parser().parse_args()
     config_path = Path(args.config).resolve()
@@ -128,6 +149,16 @@ def main() -> int:
     port = args.port if args.port is not None else int(cfg_get(cfg, "server", "port", "8000"))
     reload_enabled = parse_bool(args.reload, parse_bool(cfg_get(cfg, "server", "reload", "true"), True))
     log_level = (args.log_level or cfg_get(cfg, "server", "log_level", "info")).lower()
+    open_browser = parse_bool(args.open_browser, parse_bool(cfg_get(cfg, "launcher", "open_browser", "true"), True))
+    browser_timeout_sec = (
+        args.browser_timeout_sec
+        if args.browser_timeout_sec is not None
+        else int(cfg_get(cfg, "launcher", "browser_timeout_sec", "120"))
+    )
+
+    browser_host = "localhost" if host in {"0.0.0.0", "::", "[::]"} else host
+    default_browser_url = f"http://{browser_host}:{port}/"
+    browser_url = (args.browser_url or cfg_get(cfg, "launcher", "browser_url", default_browser_url) or default_browser_url).strip()
 
     python_exec = pick_python(launcher_python, use_venv, venv_dir)
 
@@ -193,6 +224,7 @@ def main() -> int:
         print(f"[INFO] Python: {python_exec}")
         print(f"[INFO] Backend dir: {BACKEND_DIR}")
         print(f"[INFO] Command: {' '.join(cmd)}")
+        print(f"[INFO] Browser auto-open: {open_browser} ({browser_url})")
         return 0
 
     if auto_install:
@@ -209,6 +241,13 @@ def main() -> int:
     print(f"[INFO] Python: {python_exec}")
     print(f"[INFO] Backend dir: {BACKEND_DIR}")
     print(f"[INFO] Server: http://{host}:{port} (reload={reload_enabled})")
+    if open_browser:
+        print(f"[INFO] Browser will open when ready: {browser_url}")
+        threading.Thread(
+            target=wait_and_open_browser,
+            args=(browser_url, browser_timeout_sec),
+            daemon=True,
+        ).start()
 
     return subprocess.call(cmd, cwd=str(BACKEND_DIR), env=env)
 

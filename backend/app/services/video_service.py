@@ -96,7 +96,7 @@ class VideoService:
             "yuv420p",
         ]
 
-    def _compact_segment_label(self, label: str, fallback: str) -> str:
+    def _compact_segment_label(self, label: str, fallback: str, max_chars: int) -> str:
         compact = str(label or "").strip()
         compact = re.sub(r"[\r\n\t]+", " ", compact)
         compact = re.sub(r"\s+", " ", compact)
@@ -107,11 +107,56 @@ class VideoService:
             compact = fallback
         chunks = [part.strip() for part in re.split(r"[。！？!?；;，,：:|]", compact) if part.strip()]
         compact = chunks[0] if chunks else compact
-        has_cjk = bool(re.search(r"[\u4e00-\u9fff]", compact))
-        max_len = 10 if has_cjk else 18
+        max_len = max(3, int(max_chars))
         if len(compact) > max_len:
             compact = compact[:max_len].rstrip(" -_，,。；;：:")
         return compact or fallback
+
+    def _estimate_text_width_px(self, text: str, font_size: int) -> float:
+        width = 0.0
+        size = max(8, int(font_size))
+        for ch in str(text or ""):
+            if re.match(r"[\u4e00-\u9fff]", ch):
+                width += size * 0.92
+            elif ch.isspace():
+                width += size * 0.35
+            elif ch in ".,:;|!":
+                width += size * 0.32
+            else:
+                width += size * 0.58
+        return max(0.0, width)
+
+    def _fit_segment_label_to_width(
+        self,
+        label: str,
+        fallback: str,
+        segment_width_px: int,
+        font_size: int,
+        max_chars: int,
+    ) -> str:
+        normalized = self._compact_segment_label(label, fallback, max_chars=max_chars)
+        safe_max = max(3, int(max_chars))
+        if len(normalized) > safe_max:
+            normalized = normalized[:safe_max]
+
+        usable_width = max(4.0, float(segment_width_px) - 4.0)
+        if self._estimate_text_width_px(normalized, font_size) <= usable_width:
+            return normalized
+
+        ellipsis = "..."
+        if self._estimate_text_width_px(ellipsis, font_size) > usable_width:
+            return ellipsis
+
+        core = normalized
+        if len(core) > safe_max - len(ellipsis):
+            core = core[: max(1, safe_max - len(ellipsis))]
+
+        while core:
+            candidate = core.rstrip(" -_，,。；;：:") + ellipsis
+            if self._estimate_text_width_px(candidate, font_size) <= usable_width:
+                return candidate
+            core = core[:-1]
+        return ellipsis
 
     def _escape_drawtext_text(self, text: str) -> str:
         safe = str(text or "")
@@ -151,8 +196,12 @@ class VideoService:
         timeline: List[Dict[str, Any]],
         timeline_overview: Optional[List[Dict[str, Any]]],
         total_duration: float,
+        max_segments: int,
+        label_max_chars: int,
     ) -> List[Dict[str, Any]]:
         total_duration = max(0.1, float(total_duration))
+        safe_max_segments = max(1, int(max_segments))
+        safe_label_max_chars = max(3, int(label_max_chars))
         source = timeline_overview if timeline_overview else timeline
         raw_items: List[Dict[str, Any]] = []
         for idx, item in enumerate(source or []):
@@ -179,7 +228,11 @@ class VideoService:
                     {
                         "start": cursor,
                         "end": start,
-                        "label": self._compact_segment_label("", f"第{fallback_index}段"),
+                        "label": self._compact_segment_label(
+                            "",
+                            f"第{fallback_index}段",
+                            max_chars=safe_label_max_chars,
+                        ),
                     }
                 )
                 fallback_index += 1
@@ -192,7 +245,11 @@ class VideoService:
                 {
                     "start": start,
                     "end": end,
-                    "label": self._compact_segment_label(item["label"], f"第{fallback_index}段"),
+                    "label": self._compact_segment_label(
+                        item["label"],
+                        f"第{fallback_index}段",
+                        max_chars=safe_label_max_chars,
+                    ),
                 }
             )
             cursor = end
@@ -203,7 +260,11 @@ class VideoService:
                 {
                     "start": cursor,
                     "end": total_duration,
-                    "label": self._compact_segment_label("", f"第{fallback_index}段"),
+                    "label": self._compact_segment_label(
+                        "",
+                        f"第{fallback_index}段",
+                        max_chars=safe_label_max_chars,
+                    ),
                 }
             )
 
@@ -217,8 +278,7 @@ class VideoService:
                 continue
             merged.append(dict(seg))
 
-        max_segments = 10
-        while len(merged) > max_segments:
+        while len(merged) > safe_max_segments:
             shortest_idx = min(
                 range(len(merged)),
                 key=lambda i: float(merged[i]["end"]) - float(merged[i]["start"]),
@@ -494,6 +554,9 @@ class VideoService:
         audio_path: str,
         output_path: str,
         timeline_overview: Optional[List[Dict[str, Any]]] = None,
+        embed_progress_bar: bool = True,
+        progress_max_segments: int = 10,
+        progress_label_max_chars: int = 10,
         resolution: str = "1920x1080",
         fps: int = 30,
         progress_callback: Optional[Callable[[float, str], None]] = None,
@@ -560,38 +623,73 @@ class VideoService:
             if not temp_video.exists() or temp_video.stat().st_size <= 0:
                 raise RuntimeError("Silent video generation failed")
 
-            self._invoke_progress(progress_callback, 0.70, "Generating progress bar track...")
-            bar_spec = self._build_bottom_progress_bar_spec(width=width, height=height, total_duration_sec=target_duration)
-            progress_segments = self._build_progress_segments(
-                timeline=timeline,
-                timeline_overview=timeline_overview,
-                total_duration=target_duration,
-            )
-            bar_video = temp_dir / "progress_bar.mp4"
-            self._create_progress_bar_video(
-                output_path=str(bar_video),
-                width=width,
-                bar_height=int(bar_spec["bar_height"]),
-                fps=fps,
-                duration=max(0.1, target_duration),
-                track_color=str(bar_spec["track_color"]),
-                progress_color=str(bar_spec["progress_color"]),
-                segments=progress_segments,
-                progress_callback=progress_callback,
-                progress_range=(0.70, 0.78),
-            )
+            if embed_progress_bar:
+                self._invoke_progress(progress_callback, 0.70, "Generating progress bar track...")
+                bar_spec = self._build_bottom_progress_bar_spec(width=width, height=height, total_duration_sec=target_duration)
+                progress_segments = self._build_progress_segments(
+                    timeline=timeline,
+                    timeline_overview=timeline_overview,
+                    total_duration=target_duration,
+                    max_segments=progress_max_segments,
+                    label_max_chars=progress_label_max_chars,
+                )
+                bar_video = temp_dir / "progress_bar.mp4"
+                self._create_progress_bar_video(
+                    output_path=str(bar_video),
+                    width=width,
+                    bar_height=int(bar_spec["bar_height"]),
+                    fps=fps,
+                    duration=max(0.1, target_duration),
+                    track_color=str(bar_spec["track_color"]),
+                    progress_color=str(bar_spec["progress_color"]),
+                    segments=progress_segments,
+                    label_max_chars=progress_label_max_chars,
+                    progress_callback=progress_callback,
+                    progress_range=(0.70, 0.78),
+                )
 
-            self._invoke_progress(progress_callback, 0.78, "Compositing final video...")
-            self._compose_final_video_with_progress(
-                base_video_path=str(temp_video),
-                progress_video_path=str(bar_video),
-                audio_path=audio_path if audio_path else None,
-                output_path=output_path,
-                progress_y=int(bar_spec["bar_y"]),
-                expected_duration=max(0.1, target_duration),
-                progress_callback=progress_callback,
-                progress_range=(0.78, 0.97),
-            )
+                self._invoke_progress(progress_callback, 0.78, "Compositing final video...")
+                self._compose_final_video_with_progress(
+                    base_video_path=str(temp_video),
+                    progress_video_path=str(bar_video),
+                    audio_path=audio_path if audio_path else None,
+                    output_path=output_path,
+                    progress_y=int(bar_spec["bar_y"]),
+                    expected_duration=max(0.1, target_duration),
+                    progress_callback=progress_callback,
+                    progress_range=(0.78, 0.97),
+                )
+            else:
+                self._invoke_progress(progress_callback, 0.70, "In-video progress bar disabled, exporting video...")
+                if audio_path:
+                    self._merge_audio_video(
+                        video_path=str(temp_video),
+                        audio_path=str(audio_path),
+                        output_path=output_path,
+                        expected_duration=max(0.1, target_duration),
+                        progress_callback=progress_callback,
+                        progress_range=(0.78, 0.97),
+                    )
+                else:
+                    cmd = [
+                        settings.FFMPEG_PATH,
+                        "-y",
+                        "-progress",
+                        "pipe:1",
+                        "-nostats",
+                        "-i",
+                        str(temp_video),
+                        "-c:v",
+                        "copy",
+                        output_path,
+                    ]
+                    self._run_ffmpeg_with_progress(
+                        cmd=cmd,
+                        total_duration_sec=max(0.1, target_duration),
+                        stage_message="Exporting final video",
+                        progress_callback=progress_callback,
+                        progress_range=(0.78, 0.97),
+                    )
 
             if not output_path_obj.exists() or output_path_obj.stat().st_size <= 0:
                 raise RuntimeError("Final output file was not generated")
@@ -716,6 +814,7 @@ class VideoService:
         track_color: str,
         progress_color: str,
         segments: List[Dict[str, Any]],
+        label_max_chars: int,
         progress_callback: Optional[Callable[[float, str], None]] = None,
         progress_range: Tuple[float, float] = (0.0, 1.0),
     ) -> None:
@@ -739,7 +838,6 @@ class VideoService:
         text_base_color = "0xD8DEE7"
         text_active_color = "0xFFFFFF"
         font_size = max(10, int(round(bar_height * 0.52)))
-        min_text_width = max(64, int(round(width * 0.08)))
         font_option = self._pick_drawtext_font_option()
         font_prefix = (font_option + ":") if font_option else ""
 
@@ -782,9 +880,13 @@ class VideoService:
             current_stage = stage_name
 
         for seg in geom_segments:
-            if int(seg["w"]) < min_text_width:
-                continue
-            label = self._compact_segment_label(str(seg["label"]), f"第{int(seg['index']) + 1}段")
+            label = self._fit_segment_label_to_width(
+                label=str(seg["label"]),
+                fallback=f"第{int(seg['index']) + 1}段",
+                segment_width_px=int(seg["w"]),
+                font_size=font_size,
+                max_chars=label_max_chars,
+            )
             safe_label = self._escape_drawtext_text(label)
             start_t = float(seg["start"])
             end_t = float(seg["end"])

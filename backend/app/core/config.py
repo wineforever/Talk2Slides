@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     PPT_EXPORT_DPI: int = 300
     VIDEO_FORCE_FIRST_SLIDE_FRAME: bool = True
     VIDEO_FORCE_LAST_SLIDE_TAIL_SEC: float = 5.0
+    VIDEO_EMBED_PROGRESS_BAR: bool = True
+    VIDEO_PROGRESS_MAX_SEGMENTS: int = 10
+    VIDEO_PROGRESS_LABEL_MAX_CHARS: int = 10
     
     # 外部工具路径
     FFMPEG_PATH: str = Field(
