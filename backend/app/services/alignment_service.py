@@ -1,13 +1,16 @@
 import numpy as np
 import re
+import os
 from typing import List, Dict, Any, Tuple, Optional, Set
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 import logging
 import threading
+import requests
 
 from app.core.config import settings
+from app.services.model_store_service import resolve_local_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +38,11 @@ class AlignmentService:
             model_name: sentence-transformers妯″瀷鍚嶇О
         """
         self.model_name = model_name or settings.SENTENCE_TRANSFORMER_MODEL
+        self.active_model_name = self.model_name
         self.model_device = (getattr(settings, "SENTENCE_TRANSFORMER_DEVICE", "") or "").strip()
         self.model = None
+        self.model_load_error: Optional[str] = None
+        self.semantic_fallback_used: bool = False
         self.last_alignment_report: Dict[str, Any] = {}
         # 寤惰繜鍔犺浇妯″瀷锛屽湪绗竴娆′娇鐢ㄦ椂鍔犺浇
     
@@ -239,29 +245,141 @@ class AlignmentService:
         np.clip(prior, -0.6, 0.6, out=prior)
         return prior, structure
 
+    def _get_model_load_kwargs(self, local_files_only: bool) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {"local_files_only": bool(local_files_only)}
+        if self.model_device:
+            kwargs["device"] = self.model_device
+        cache_dir = (getattr(settings, "SENTENCE_TRANSFORMER_CACHE_DIR", "") or "").strip()
+        if cache_dir:
+            kwargs["cache_folder"] = cache_dir
+        return kwargs
+
+    def _is_local_model_name(self, model_name: str) -> bool:
+        model_name = str(model_name or "").strip()
+        if not model_name:
+            return False
+        expanded = os.path.expanduser(model_name)
+        if os.path.exists(expanded):
+            return True
+        if os.path.isabs(expanded):
+            return True
+        if model_name.startswith((".", "~")):
+            return True
+        return bool(re.match(r"^[A-Za-z]:[\\/]", model_name))
+
+    def _configure_hf_runtime(self) -> str:
+        endpoint = (
+            (getattr(settings, "SENTENCE_TRANSFORMER_HF_ENDPOINT", "") or "").strip()
+            or os.getenv("HF_ENDPOINT", "").strip()
+            or "https://huggingface.co"
+        ).rstrip("/")
+        if endpoint:
+            os.environ["HF_ENDPOINT"] = endpoint
+
+        etag_timeout = int(max(1, int(getattr(settings, "SENTENCE_TRANSFORMER_HF_ETAG_TIMEOUT_SEC", 10))))
+        download_timeout = int(max(1, int(getattr(settings, "SENTENCE_TRANSFORMER_HF_DOWNLOAD_TIMEOUT_SEC", 15))))
+        os.environ["HF_HUB_ETAG_TIMEOUT"] = str(etag_timeout)
+        os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = str(download_timeout)
+        return endpoint or "https://huggingface.co"
+
+    def _is_hf_endpoint_reachable(self, endpoint: str) -> bool:
+        timeout = float(max(0.2, float(getattr(settings, "SENTENCE_TRANSFORMER_ENDPOINT_CHECK_TIMEOUT_SEC", 2.5))))
+        try:
+            response = requests.head(endpoint, timeout=timeout, allow_redirects=True)
+            return int(response.status_code) < 500
+        except Exception as exc:
+            logger.warning("HuggingFace endpoint probe failed (%s): %s", endpoint, exc)
+            return False
+
+    def _resolve_model_reference(self) -> Tuple[str, bool]:
+        configured_name = str(self.model_name or "").strip()
+        resolved_name, is_local = resolve_local_model_path(configured_name)
+        if is_local and resolved_name != configured_name:
+            logger.info(
+                "Use local model directory for alignment: configured=%s, local_dir=%s",
+                configured_name,
+                resolved_name,
+            )
+        return resolved_name, is_local
+
     def _load_model(self):
         """鍔犺浇棰勮缁冩ā鍨?"""
-        try:
-            cache_key = (self.model_name, self.model_device or None)
-            with self._MODEL_CACHE_LOCK:
-                cached_model = self._MODEL_CACHE.get(cache_key)
-                if cached_model is not None:
-                    self.model = cached_model
-                    logger.info(f"澶嶇敤宸茬紦瀛樻ā鍨? {self.model_name} device={self.model_device or 'default'}")
-                    return
+        resolved_model_name, resolved_local_dir = self._resolve_model_reference()
+        self.active_model_name = resolved_model_name
+        cache_key = (resolved_model_name, self.model_device or None)
+        with self._MODEL_CACHE_LOCK:
+            cached_model = self._MODEL_CACHE.get(cache_key)
+            if cached_model is not None:
+                self.model = cached_model
+                self.model_load_error = None
+                self.semantic_fallback_used = False
+                logger.info(f"澶嶇敤宸茬紦瀛樻ā鍨? {resolved_model_name} device={self.model_device or 'default'}")
+                return
 
-            logger.info(f"姝ｅ湪鍔犺浇妯″瀷: {self.model_name} device={self.model_device or 'default'}")
-            if self.model_device:
-                loaded_model = SentenceTransformer(self.model_name, device=self.model_device)
-            else:
-                loaded_model = SentenceTransformer(self.model_name)
-            self.model = loaded_model
+        self.model_load_error = None
+        self.semantic_fallback_used = False
+        endpoint = self._configure_hf_runtime()
+        load_errors: List[str] = []
+
+        # Always attempt local cache first to avoid unnecessary network waits.
+        try:
+            logger.info("Trying local cached model first: %s", resolved_model_name)
+            local_model = SentenceTransformer(resolved_model_name, **self._get_model_load_kwargs(local_files_only=True))
+            self.model = local_model
             with self._MODEL_CACHE_LOCK:
-                self._MODEL_CACHE[cache_key] = loaded_model
-            logger.info("妯″瀷鍔犺浇瀹屾垚")
-        except Exception as e:
-            logger.error(f"妯″瀷鍔犺浇澶辫触: {str(e)}")
-            raise Exception(f"鏃犳硶鍔犺浇妯″瀷 {self.model_name}: {str(e)}")
+                self._MODEL_CACHE[cache_key] = local_model
+            logger.info("Model loaded from local cache")
+            return
+        except Exception as exc:
+            load_errors.append(f"local cache: {exc}")
+            logger.warning("Local cached model unavailable: %s", exc)
+
+        local_only = bool(getattr(settings, "SENTENCE_TRANSFORMER_LOCAL_FILES_ONLY", False)) or bool(resolved_local_dir)
+        allow_remote = bool(getattr(settings, "SENTENCE_TRANSFORMER_ALLOW_REMOTE_DOWNLOAD", True))
+        if self._is_local_model_name(resolved_model_name):
+            allow_remote = False
+        if local_only:
+            allow_remote = False
+
+        if allow_remote and bool(getattr(settings, "SENTENCE_TRANSFORMER_SKIP_REMOTE_WHEN_ENDPOINT_UNREACHABLE", True)):
+            if not self._is_hf_endpoint_reachable(endpoint):
+                allow_remote = False
+                load_errors.append(f"endpoint unreachable: {endpoint}")
+                logger.warning("Skip remote model download because endpoint is unreachable: %s", endpoint)
+
+        if allow_remote:
+            try:
+                logger.info("Trying remote model download: %s", resolved_model_name)
+                remote_model = SentenceTransformer(resolved_model_name, **self._get_model_load_kwargs(local_files_only=False))
+                self.model = remote_model
+                with self._MODEL_CACHE_LOCK:
+                    self._MODEL_CACHE[cache_key] = remote_model
+                logger.info("Model downloaded and loaded successfully")
+                return
+            except Exception as exc:
+                load_errors.append(f"remote download: {exc}")
+                logger.error("Remote model load failed: %s", exc)
+        else:
+            logger.info(
+                "Remote model download disabled (local_only=%s, allow_remote=%s, model_name=%s)",
+                local_only,
+                bool(getattr(settings, "SENTENCE_TRANSFORMER_ALLOW_REMOTE_DOWNLOAD", True)),
+                resolved_model_name,
+            )
+
+        joined_error = " | ".join(load_errors) if load_errors else "unknown error"
+        self.model = None
+        self.model_load_error = joined_error
+        if bool(getattr(settings, "SENTENCE_TRANSFORMER_FALLBACK_TO_LEXICAL", True)):
+            self.semantic_fallback_used = True
+            logger.warning(
+                "Semantic model unavailable, fallback to lexical/numeric alignment. model=%s error=%s",
+                resolved_model_name,
+                joined_error,
+            )
+            return
+
+        raise Exception(f"鏃犳硶鍔犺浇妯″瀷 {resolved_model_name}: {joined_error}")
     
     def align_slides_with_subtitles(
         self,
@@ -292,6 +410,7 @@ class AlignmentService:
 
         if self.model is None:
             self._load_model()
+        semantic_model_enabled = self.model is not None
 
         sequential_mode = settings.ALIGN_ENFORCE_SEQUENTIAL if enforce_sequential is None else bool(enforce_sequential)
         require_full_coverage = settings.ALIGN_REQUIRE_FULL_COVERAGE if sequential_mode else False
@@ -314,7 +433,7 @@ class AlignmentService:
         switch_delay_sec = switch_delay_ms / 1000.0
         pause_threshold_sec = float(max(0.0, settings.ALIGN_PAUSE_SWITCH_THRESHOLD_SEC))
 
-        semantic_weight = float(max(0.0, settings.ALIGN_SEMANTIC_WEIGHT))
+        semantic_weight = float(max(0.0, settings.ALIGN_SEMANTIC_WEIGHT)) if semantic_model_enabled else 0.0
         lexical_weight = float(max(0.0, settings.ALIGN_LEXICAL_WEIGHT))
         numeric_weight = float(max(0.0, settings.ALIGN_NUMERIC_WEIGHT))
         structure_weight_raw = (
@@ -325,7 +444,10 @@ class AlignmentService:
         structure_weight = float(min(max(structure_weight_raw, 0.0), 0.35))
         total_weight = semantic_weight + lexical_weight + numeric_weight
         if total_weight <= 0:
-            semantic_weight, lexical_weight, numeric_weight = 1.0, 0.0, 0.0
+            if semantic_model_enabled:
+                semantic_weight, lexical_weight, numeric_weight = 1.0, 0.0, 0.0
+            else:
+                semantic_weight, lexical_weight, numeric_weight = 0.0, 1.0, 0.0
             total_weight = 1.0
         semantic_weight /= total_weight
         lexical_weight /= total_weight
@@ -336,8 +458,10 @@ class AlignmentService:
             f"slides={len(slides)}, subtitles={len(subtitles)}, threshold={similarity_threshold}, "
             f"switch_delay_ms={switch_delay_ms}, sequential={sequential_mode}, "
             f"no_revisit={enforce_no_revisit}, min_usage_ratio={min_slide_usage_ratio:.2f}, "
-            f"structure_weight={structure_weight:.2f}"
+            f"structure_weight={structure_weight:.2f}, semantic_enabled={semantic_model_enabled}"
         )
+        if not semantic_model_enabled:
+            logger.warning("Semantic model disabled, using lexical/numeric fallback only")
 
         slide_texts = self._build_slide_alignment_texts(slides)
         subtitle_texts = [
@@ -345,9 +469,12 @@ class AlignmentService:
             for subtitle in subtitles
         ]
 
-        slide_embeddings = self.model.encode(slide_texts, convert_to_numpy=True)
-        subtitle_embeddings = self.model.encode(subtitle_texts, convert_to_numpy=True)
-        semantic_similarity_matrix = cosine_similarity(subtitle_embeddings, slide_embeddings)
+        if semantic_model_enabled:
+            slide_embeddings = self.model.encode(slide_texts, convert_to_numpy=True)
+            subtitle_embeddings = self.model.encode(subtitle_texts, convert_to_numpy=True)
+            semantic_similarity_matrix = cosine_similarity(subtitle_embeddings, slide_embeddings)
+        else:
+            semantic_similarity_matrix = np.zeros((len(subtitles), len(slides)), dtype=float)
         lexical_similarity_matrix = self._compute_lexical_similarity_matrix(slide_texts, subtitle_texts)
         numeric_bonus_matrix = self._compute_numeric_bonus_matrix(slide_texts, subtitle_texts)
         structure_prior_matrix = np.empty((0, 0), dtype=float)
@@ -463,6 +590,14 @@ class AlignmentService:
         )
         if structure_meta:
             self.last_alignment_report["structure"] = structure_meta
+        self.last_alignment_report["model"] = {
+            "configured_name": self.model_name,
+            "effective_name": self.active_model_name,
+            "device": self.model_device or "default",
+            "semantic_model_enabled": bool(semantic_model_enabled),
+            "semantic_fallback_used": bool(self.semantic_fallback_used),
+            "load_error": self.model_load_error or "",
+        }
 
         if not timeline:
             logger.warning("语义对齐失败，没有生成任何时间片段")

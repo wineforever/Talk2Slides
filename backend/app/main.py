@@ -12,6 +12,7 @@ from typing import Optional
 from app.api.endpoints import router as api_router
 from app.core.config import settings
 from app.services.task_manager import TaskManager
+from app.services.model_store_service import bootstrap_local_model_if_needed
 
 # 创建lifespan上下文管理器
 @asynccontextmanager
@@ -19,8 +20,19 @@ async def lifespan(app: FastAPI):
     # 启动时初始化
     os.makedirs(settings.TEMP_DIR, exist_ok=True)
     os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+    os.makedirs(settings.SENTENCE_TRANSFORMER_LOCAL_MODEL_DIR, exist_ok=True)
     print(f"临时目录: {settings.TEMP_DIR}")
     print(f"输出目录: {settings.OUTPUT_DIR}")
+    print(f"模型目录: {settings.SENTENCE_TRANSFORMER_LOCAL_MODEL_DIR}")
+
+    if settings.SENTENCE_TRANSFORMER_BOOTSTRAP_ON_STARTUP:
+        try:
+            local_model_path = bootstrap_local_model_if_needed()
+            if local_model_path:
+                print(f"语义模型就绪: {local_model_path}")
+        except Exception as exc:
+            # Keep service startup robust; runtime alignment has lexical fallback.
+            print(f"[WARN] 语义模型预下载失败，将按降级策略继续运行: {exc}")
     
     yield  # 应用运行期间
     
