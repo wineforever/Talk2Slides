@@ -4,10 +4,47 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Talk2Slides - 语义对齐视频生成</title>
-    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css" />
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <script src="https://unpkg.com/element-plus"></script>
-    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <script>
+        window.__talk2slidesBootErrors = [];
+        window.addEventListener('error', function (event) {
+            var target = event && event.target;
+            var isResourceError = target && target !== window && typeof target.tagName === 'string';
+            window.__talk2slidesBootErrors.push({
+                type: isResourceError ? 'resource' : 'error',
+                message: event && event.message ? String(event.message) : '',
+                filename: event && event.filename ? String(event.filename) : '',
+                source: isResourceError ? String(target.tagName).toLowerCase() : '',
+                src: isResourceError ? String(target.src || target.href || '') : ''
+            });
+        }, true);
+        window.addEventListener('unhandledrejection', function (event) {
+            var reason = event && event.reason;
+            window.__talk2slidesBootErrors.push({
+                type: 'unhandledrejection',
+                message: reason && reason.message ? String(reason.message) : String(reason || '')
+            });
+        });
+    </script>
+    <link rel="stylesheet" href="/vendor/element-plus.css" />
+    <script>
+        window.__talk2slidesOriginalRequire = typeof window.require === 'function' ? window.require.bind(window) : null;
+        window.require = function (name) {
+            if (name === 'vue') return window.Vue;
+            if (name === 'util') {
+                return {
+                    format: function () {
+                        return Array.prototype.slice.call(arguments).join(' ');
+                    },
+                    types: {}
+                };
+            }
+            if (window.__talk2slidesOriginalRequire) return window.__talk2slidesOriginalRequire(name);
+            throw new Error('Unsupported CommonJS dependency: ' + name);
+        };
+    </script>
+    <script src="/vendor/vue.global.prod.js"></script>
+    <script src="/vendor/element-plus.full.min.js"></script>
+    <script src="/vendor/axios.min.js"></script>
     <style>
         :root {
             --ios-blue: #0a84ff;
@@ -443,6 +480,43 @@
             color: #70829b;
         }
 
+        .boot-error-shell {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: calc(100vh - 48px);
+        }
+
+        .boot-error-card {
+            max-width: 720px;
+            padding: 28px;
+            border-radius: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.75);
+            background: rgba(255, 255, 255, 0.88);
+            box-shadow: 0 20px 42px rgba(24, 44, 77, 0.14);
+        }
+
+        .boot-error-title {
+            margin-bottom: 10px;
+            font-size: 24px;
+            font-weight: 760;
+            color: #142033;
+        }
+
+        .boot-error-text {
+            margin-bottom: 10px;
+            line-height: 1.6;
+            color: #506178;
+        }
+
+        .boot-error-meta {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #22324a;
+            word-break: break-word;
+        }
+
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(10px); }
             to { opacity: 1; transform: translateY(0); }
@@ -721,10 +795,34 @@
 </div>
 
 <script>
-const { createApp, ref, computed, onMounted } = Vue;
-const { ElMessage } = ElementPlus;
+(() => {
+    const missingDeps = [];
+    if (!window.Vue) missingDeps.push('Vue');
+    if (!window.ElementPlus || typeof window.ElementPlus.install !== 'function') missingDeps.push('Element Plus');
+    if (!window.axios) missingDeps.push('Axios');
 
-createApp({
+    if (missingDeps.length) {
+        const appRoot = document.getElementById('app');
+        if (appRoot) {
+            appRoot.innerHTML = `
+                <div class="boot-error-shell">
+                    <div class="boot-error-card">
+                        <div class="boot-error-title">页面初始化失败</div>
+                        <p class="boot-error-text">前端依赖没有成功加载，所以页面里的上传、按钮和参数控件都不会生效。</p>
+                        <p class="boot-error-text">这通常是静态资源加载失败、浏览器缓存异常，或者服务没有正确提供前端依赖文件导致的。</p>
+                        <div class="boot-error-meta">Missing dependencies: ${missingDeps.join(', ')}</div>
+                    </div>
+                </div>
+            `;
+        }
+        console.error('Frontend dependencies failed to load:', missingDeps);
+        return;
+    }
+
+    const { createApp, ref, computed, onMounted } = Vue;
+    const { ElMessage } = ElementPlus;
+
+    const app = createApp({
     setup() {
         const pptxFiles = ref([]);
         const mp3Files = ref([]);
@@ -1133,7 +1231,43 @@ createApp({
             startProcessing
         };
     }
-}).use(ElementPlus).mount('#app');
+    });
+
+    app.use(ElementPlus);
+
+    const appRoot = document.getElementById('app');
+    if (appRoot) {
+        appRoot.dataset.appMounted = 'pending';
+    }
+
+    app.mount('#app');
+    if (appRoot) appRoot.dataset.appMounted = 'true';
+})();
+</script>
+<script>
+window.addEventListener('load', function () {
+    setTimeout(function () {
+        var appRoot = document.getElementById('app');
+        var mounted = appRoot && appRoot.dataset && appRoot.dataset.appMounted === 'true';
+        var bootErrors = window.__talk2slidesBootErrors || [];
+        if (!appRoot || mounted || !bootErrors.length) return;
+
+        var firstError = bootErrors[0] || {};
+        var summary = firstError.message || firstError.src || 'Unknown boot error';
+        var escapedSummary = String(summary).replace(/[<>&"]/g, function (ch) {
+            return ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[ch];
+        });
+        appRoot.innerHTML = ''
+            + '<div class="boot-error-shell">'
+            + '  <div class="boot-error-card">'
+            + '    <div class="boot-error-title">页面初始化失败</div>'
+            + '    <p class="boot-error-text">前端脚本没有正常启动，所以页面里的上传、按钮和参数控件都不会生效。</p>'
+            + '    <p class="boot-error-text">请查看下面这条启动错误，通常就是根因。</p>'
+            + '    <div class="boot-error-meta">' + escapedSummary + '</div>'
+            + '  </div>'
+            + '</div>';
+    }, 300);
+});
 </script>
 </body>
 </html>
