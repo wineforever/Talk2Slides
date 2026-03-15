@@ -85,6 +85,10 @@ class Settings(BaseSettings):
         default="soffice.exe" if platform.system() == "Windows" else "soffice",
         description="Path to LibreOffice executable",
     )
+    POPPLER_PATH: str = Field(
+        default="",
+        description="Optional path to Poppler bin directory or pdftoppm executable",
+    )
 
     # Task lifecycle
     MAX_TASK_AGE_HOURS: int = 24

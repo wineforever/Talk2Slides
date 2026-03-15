@@ -4,7 +4,7 @@ import tempfile
 import platform
 import locale
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import json
 import logging
 
@@ -21,6 +21,7 @@ class PPTService:
     """PPT处理服务"""
 
     _cached_libreoffice_path: str = ""
+    _cached_poppler_path: str = ""
     _poppler_checked: bool = False
     _poppler_available: bool = False
 
@@ -85,10 +86,14 @@ class PPTService:
         if cls._poppler_checked:
             return cls._poppler_available
 
+        poppler_path = self._get_poppler_path()
+        executable_name = "pdftoppm.exe" if platform.system() == "Windows" else "pdftoppm"
+        command = [str(Path(poppler_path) / executable_name), "-v"] if poppler_path else [executable_name, "-v"]
+
         try:
             # 尝试运行pdftoppm命令检查poppler是否可用
             result = subprocess.run(
-                ["pdftoppm", "-v"],
+                command,
                 capture_output=True,
                 text=True,
                 encoding=self._safe_text_encoding(),
@@ -101,8 +106,125 @@ class PPTService:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             cls._poppler_available = False
 
+        if cls._poppler_available and poppler_path:
+            logger.info("Using Poppler from %s", poppler_path)
+
         cls._poppler_checked = True
         return cls._poppler_available
+
+    def _get_poppler_path(self) -> Optional[str]:
+        cls = type(self)
+        if cls._cached_poppler_path and Path(cls._cached_poppler_path).exists():
+            return cls._cached_poppler_path
+
+        executable_name = "pdftoppm.exe" if platform.system() == "Windows" else "pdftoppm"
+        seen: set[str] = set()
+
+        for candidate in self._iter_poppler_candidates():
+            normalized = os.path.normcase(str(candidate))
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+
+            executable_path = candidate / executable_name
+            if executable_path.exists():
+                cls._cached_poppler_path = str(candidate)
+                return cls._cached_poppler_path
+
+        which_path = shutil.which(executable_name)
+        if which_path:
+            cls._cached_poppler_path = str(Path(which_path).parent)
+            return cls._cached_poppler_path
+
+        return None
+
+    def _iter_poppler_candidates(self) -> List[Path]:
+        candidates: List[Path] = []
+
+        for configured_path in (
+            getattr(settings, "POPPLER_PATH", ""),
+            os.getenv("PDF2IMAGE_POPPLER_PATH", ""),
+        ):
+            candidates.extend(self._expand_poppler_candidate(configured_path))
+
+        if platform.system() == "Windows":
+            for root_text in (
+                os.environ.get("ProgramFiles", ""),
+                os.environ.get("ProgramW6432", ""),
+                os.environ.get("ProgramFiles(x86)", ""),
+                os.environ.get("LOCALAPPDATA", ""),
+            ):
+                if not root_text:
+                    continue
+
+                root = Path(os.path.expandvars(root_text))
+                candidates.extend(
+                    [
+                        root / "poppler" / "Library" / "bin",
+                        root / "poppler" / "bin",
+                    ]
+                )
+
+                if root.exists():
+                    for match in sorted(root.glob("poppler*")):
+                        if not match.is_dir():
+                            continue
+                        candidates.extend(
+                            [
+                                match / "Library" / "bin",
+                                match / "bin",
+                            ]
+                        )
+
+            candidates.extend(
+                [
+                    Path(r"C:\poppler\Library\bin"),
+                    Path(r"C:\poppler\bin"),
+                    Path(r"C:\ProgramData\chocolatey\bin"),
+                ]
+            )
+
+        return candidates
+
+    def _expand_poppler_candidate(self, configured_path: str) -> List[Path]:
+        text = str(configured_path or "").strip().strip('"')
+        if not text:
+            return []
+
+        candidate = Path(os.path.expandvars(os.path.expanduser(text)))
+        if not any(sep in text for sep in ("\\", "/")) and not candidate.drive:
+            which_path = shutil.which(text)
+            return [Path(which_path).parent] if which_path else []
+
+        if candidate.suffix.lower() == ".exe":
+            return [candidate.parent]
+
+        return [
+            candidate,
+            candidate / "Library" / "bin",
+            candidate / "bin",
+        ]
+
+    def _build_poppler_error_message(self) -> str:
+        configured_path = str(getattr(settings, "POPPLER_PATH", "") or "").strip() or "(not set)"
+
+        if platform.system() == "Windows":
+            return (
+                "检测到Poppler不可用。pdf2image需要poppler-utils来解析PDF文件。\n\n"
+                f"当前POPPLER_PATH配置：{configured_path}\n"
+                "如果你已经安装了Poppler，通常是当前服务进程没有继承到正确的PATH。\n\n"
+                "请优先在 talk2slides.ini 的 [env] 段显式配置：\n"
+                "POPPLER_PATH = C:\\Program Files\\poppler\\Library\\bin\n\n"
+                "也可以配置为 pdftoppm.exe 的完整路径，例如：\n"
+                "POPPLER_PATH = C:\\Program Files\\poppler\\Library\\bin\\pdftoppm.exe\n\n"
+                "如果使用的是带版本号的目录，请改成你的实际目录后重启应用或重启 Windows Service。"
+            )
+
+        return (
+            "检测到Poppler不可用。pdf2image需要poppler-utils来解析PDF文件。\n\n"
+            f"当前POPPLER_PATH配置：{configured_path}\n"
+            "请确保 pdftoppm 在 PATH 中可用，或显式配置 POPPLER_PATH 指向 Poppler 的 bin 目录。"
+        )
     
     def extract_slides(self, pptx_path: str) -> List[Dict[str, Any]]:
         """从PPTX文件中提取幻灯片文本内容
@@ -216,31 +338,11 @@ class PPTService:
         """
         # 在try块之前获取LibreOffice路径，以便在异常处理中使用
         libreoffice_path = self._get_libreoffice_path()
+        poppler_path = self._get_poppler_path()
         
         # 检查poppler是否安装
         if not self._check_poppler_installed():
-            if platform.system() == "Windows":
-                raise Exception(
-                    "检测到Poppler未安装。pdf2image需要poppler-utils来解析PDF文件。\n\n"
-                    "请执行以下步骤安装Poppler：\n"
-                    "1. 下载Poppler for Windows：https://github.com/oschwartz10612/poppler-windows/releases/\n"
-                    "2. 解压下载的ZIP文件到目录，如：C:\\Program Files\\poppler\n"
-                    "3. 将bin目录（如：C:\\Program Files\\poppler\\Library\\bin）添加到系统PATH\n"
-                    "4. 重启终端使PATH生效\n\n"
-                    "或者使用以下方法：\n"
-                    "- 使用conda安装：conda install -c conda-forge poppler\n"
-                    "- 使用chocolatey安装：choco install poppler\n\n"
-                    "安装完成后请重启应用。"
-                )
-            else:
-                raise Exception(
-                    "检测到Poppler未安装。pdf2image需要poppler-utils来解析PDF文件。\n\n"
-                    "请执行以下步骤安装Poppler：\n"
-                    "1. Ubuntu/Debian：sudo apt-get install poppler-utils\n"
-                    "2. CentOS/RHEL/Fedora：sudo yum install poppler-utils\n"
-                    "3. macOS：brew install poppler\n\n"
-                    "安装后请确保poppler工具在PATH中可用，然后重启应用。"
-                )
+            raise Exception(self._build_poppler_error_message())
         
         try:
             # 确保输出目录存在
@@ -289,7 +391,8 @@ class PPTService:
                     size=(width, height),
                     output_folder=str(output_path),
                     fmt="png",
-                    paths_only=True
+                    paths_only=True,
+                    poppler_path=poppler_path,
                 )
                 
                 # 确保图片按顺序命名
@@ -334,27 +437,7 @@ class PPTService:
                     f"当前配置路径：{settings.LIBREOFFICE_PATH}"
                 )
         except PDFInfoNotInstalledError:
-            if platform.system() == "Windows":
-                raise Exception(
-                    "未找到Poppler，pdf2image需要poppler-utils来解析PDF文件。\n\n"
-                    "请执行以下步骤安装Poppler：\n"
-                    "1. 下载Poppler for Windows：https://github.com/oschwartz10612/poppler-windows/releases/\n"
-                    "2. 解压下载的ZIP文件到目录，如：C:\\Program Files\\poppler\n"
-                    "3. 将bin目录（如：C:\\Program Files\\poppler\\Library\\bin）添加到系统PATH\n"
-                    "4. 重启终端使PATH生效\n\n"
-                    "或者使用以下方法：\n"
-                    "- 使用conda安装：conda install -c conda-forge poppler\n"
-                    "- 使用chocolatey安装：choco install poppler"
-                )
-            else:
-                raise Exception(
-                    "未找到Poppler，pdf2image需要poppler-utils来解析PDF文件。\n\n"
-                    "请执行以下步骤安装Poppler：\n"
-                    "1. Ubuntu/Debian：sudo apt-get install poppler-utils\n"
-                    "2. CentOS/RHEL/Fedora：sudo yum install poppler-utils\n"
-                    "3. macOS：brew install poppler\n\n"
-                    "安装后请确保poppler工具在PATH中可用"
-                )
+            raise Exception(self._build_poppler_error_message())
         except Exception as e:
             raise Exception(f"PPT导出失败: {str(e)}")
     

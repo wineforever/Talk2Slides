@@ -17,4 +17,5 @@ __pycache__/
 backend/app/models/
 backend/temp/
 output/
+logs/
 processing.log
